@@ -1,0 +1,122 @@
+{
+  "df_overlay_url": {
+    "description": "Overlay 服务地址",
+    "type": "string",
+    "default": "http://192.168.1.5:8788",
+    "hint": "delta-force-overlay 的地址。插件通过 /api/state 读取对局数据。示例：http://192.168.1.5:8788"
+  },
+  "df_broadcast_groups": {
+    "description": "播报目标群",
+    "type": "list",
+    "default": [],
+    "hint": "QQ官方机器人：填群的 group_openid（不是群号！在群里发 /df 订阅 会自动填入）；OneBot：填 QQ 群号。也可在群里发 /df 订阅 自动加入"
+  },
+  "df_enable_red": {
+    "description": "播报红（grade 6）",
+    "type": "bool",
+    "default": true,
+    "hint": "出红色品质物品时播报。红清单：曼德尔超算单元、浓缩铀样本、火箭燃料、量子存储、实验数据、万足金条、鎏金卡牌等"
+  },
+  "df_enable_keycard": {
+    "description": "播报房卡（ID 1505 开头）",
+    "type": "bool",
+    "default": true,
+    "hint": "出房卡/门禁卡时播报。如食堂洗碗间、西区大门、西楼医务室、变电站宿舍等"
+  },
+  "df_min_value": {
+    "description": "最低带出价值（万哈夫币）",
+    "type": "int",
+    "default": 0,
+    "hint": "带出价值低于此值的对局不播报。0 表示不限制。例如填 100 表示只播报带出超过 100 万的对局"
+  },
+  "df_only_escape": {
+    "description": "只播报撤离成功的对局",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后，撤离失败的对局即使出了红也不播报"
+  },
+  "df_poll_interval": {
+    "description": "轮询间隔（秒）",
+    "type": "int",
+    "default": 30,
+    "hint": "多久检查一次 overlay 的新对局。建议 20-60 秒"
+  },
+  "df_render_mode": {
+    "description": "播报样式",
+    "type": "string",
+    "default": "card",
+    "hint": "card=图片卡片（需要 AstrBot 的 html_render）；text=纯文字。填 card 或 text"
+  },
+  "df_show_avatar": {
+    "description": "卡片显示账号头像",
+    "type": "bool",
+    "default": false,
+    "hint": "默认不显示。开启后左上角显示账号头像，关闭则显示红/房卡数量徽章"
+  },
+  "df_show_items": {
+    "description": "卡片显示带出物品明细",
+    "type": "bool",
+    "default": true,
+    "hint": "列出本局带出的红/房卡（名称 + 数量 + 单价）"
+  },
+  "df_attach_text": {
+    "description": "卡片附带文字摘要",
+    "type": "bool",
+    "default": true,
+    "hint": "发图片卡片时额外附一条文字：谁、在哪、什么时候、出了什么。方便快速扫读和搜索"
+  },
+  "df_at_all": {
+    "description": "播报时 @全体成员",
+    "type": "bool",
+    "default": false,
+    "hint": "出红时 @全体成员。注意：频繁 @全体可能被腾讯限制"
+  },
+  "df_daily_enabled": {
+    "description": "每日出货汇总",
+    "type": "bool",
+    "default": true,
+    "hint": "每天晚上定时向所有播报群推送当日出货汇总（局数/红/房卡/净收益）"
+  },
+  "df_daily_time": {
+    "description": "每日汇总时间",
+    "type": "string",
+    "default": "23:50",
+    "hint": "24 小时制，格式 HH:MM。默认 23:50（晚上 11 点 50 分）"
+  },
+  "df_report_enabled": {
+    "description": "开放外部上报接口",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后其他玩家的 overlay 可以 POST 到 /df/report，由本插件统一播报。需要配合内网穿透使用"
+  },
+  "df_report_token": {
+    "description": "上报鉴权 Token",
+    "type": "string",
+    "default": "",
+    "hint": "必填！随意一串长密码（建议 32 位）。别人的 overlay 里要填同样的值，否则会被拒绝"
+  },
+  "df_report_port": {
+    "description": "上报服务端口",
+    "type": "int",
+    "default": 8790,
+    "hint": "插件会在这个端口起一个独立 HTTP 服务接收上报。Docker 里需要把这个端口映射出来（默认 8790）"
+  },
+  "df_debug_groups": {
+    "description": "调试群（可用管理命令）",
+    "type": "list",
+    "default": [],
+    "hint": "只有这些群里能使用 /df 状态、/df 测试 等管理命令。QQ官方机器人填 group_openid"
+  },
+  "df_report_test_groups": {
+    "description": "软件测试上报推送群",
+    "type": "list",
+    "default": [],
+    "hint": "软件设置页点「测试上报」时，只推送到这些群，不会打扰正式播报群。在群里发 /df 上报测试 自动添加"
+  },
+  "df_startup_backfill_minutes": {
+    "description": "启动时回填时间（分钟）",
+    "type": "int",
+    "default": 10,
+    "hint": "插件启动时，会检查最近这么多分钟内的对局，避免重启漏播。填 0 表示不回填"
+  }
+}
