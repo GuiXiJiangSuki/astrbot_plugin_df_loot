@@ -13,17 +13,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+# 软导入：aiohttp 见 requirements.txt，缺失时仅影响日报拉取
 try:
     import aiohttp
-except ImportError:  # 本地测试
+except ImportError:
     aiohttp = None  # type: ignore[assignment]
 
-try:
-    from astrbot.api import logger
-except ImportError:
-    import logging
-
-    logger = logging.getLogger("astrbot.df_loot")
+from astrbot.api import logger
 
 
 @dataclass
