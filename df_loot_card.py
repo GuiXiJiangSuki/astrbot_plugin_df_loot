@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import io
-import logging
 import os
 from typing import Any
 
@@ -21,12 +20,7 @@ try:
 except ImportError:
     from df_loot_core import LootBattle, LootItem
 
-try:
-    from astrbot.api import logger
-except ImportError:  # 本地测试
-    import logging
-
-    logger = logging.getLogger("astrbot.df_loot")
+from astrbot.api import logger
 
 # ── 配色 ──
 BG_TOP = (28, 32, 42)
