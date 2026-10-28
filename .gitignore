@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+
+# 备份与临时文件
+*.bak
+*.bak_*
+*.bak2
+*.orig
+*.tmp
+*.log
+
+# 本地配置（含 Token，不要提交）
+config.json
+*_config.json
+!*_conf_schema.json
+data/
+
+# 系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
