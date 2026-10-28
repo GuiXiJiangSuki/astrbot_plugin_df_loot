@@ -4,23 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
+# aiohttp 由 requirements.txt 声明，AstrBot 环境自带；
+# 这里做软导入是为了让纯逻辑单元可单独导入，不影响运行时行为。
 try:
     import aiohttp
-except ImportError:  # 本地无 aiohttp 时仍可导入核心判定逻辑做测试
+except ImportError:
     aiohttp = None  # type: ignore[assignment]
 
-try:
-    # 用 AstrBot 的 logger（带 plugin_tag 等字段，否则日志格式化会报错）
-    from astrbot.api import logger
-except ImportError:  # 本地测试
-    import logging
-
-    logger = logging.getLogger("astrbot.df_loot")
+# 统一使用 AstrBot 的 logger（带 plugin_tag 等字段）。
+# 不使用 Python 内置 logging：AstrBot 的日志格式化依赖额外字段，
+# 自建 logger 会因缺字段导致格式化异常。
+from astrbot.api import logger
 
 # 品质等级：红 = grade 6（实测：曼德尔超算单元、量子存储、实验数据、鎏金卡牌等）
 GRADE_RED = 6
