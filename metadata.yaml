@@ -3,7 +3,7 @@ display_name: "三角洲出货播报"
 author: "GuiXiJiang"
 desc: "监控三角洲行动对局，出红/房卡时自动推送到 QQ 群。数据来自 delta-force-overlay"
 short_desc: "三角洲出红/房卡自动群播报"
-version: "1.0.0"
+version: "1.0.1"
 astrbot_version: ">=4.25.3,<5"
 repo: "https://github.com/GuiXiJiangSuki/astrbot_plugin_df_loot"
 support_platforms:
