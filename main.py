@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import inspect
-import logging
 from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
@@ -53,7 +52,7 @@ except ImportError:
     from df_loot_report import parse_report
     from df_loot_sample import random_battle
 
-# AstrBot 的 logger 会注入 plugin_tag 等字段；自己用 logging.getLogger 会缺字段导致格式化失败
+# 统一使用 astrbot.api 的 logger（自带 plugin_tag 等字段）
 
 
 class DfLootPlugin(Star):
@@ -219,6 +218,17 @@ class DfLootPlugin(Star):
             logger.info("[df_loot] 上报接口已关闭")
             return
 
+        # ⚠️ 安全强制：Token 为空时拒绝启动。
+        # 否则 handle_report 里的 `if expect and got != expect` 会整段跳过鉴权，
+        # 任何能访问该端口的人都能往群里推送内容。
+        if not self.report_token:
+            logger.error(
+                "[df_loot] 上报接口已开启但 df_report_token 为空，已拒绝启动。"
+                "请在插件配置里设置一个足够长的随机 Token（建议 32 位以上），"
+                "并在 overlay 设置页填入同一个值。"
+            )
+            return
+
         port = self.report_port
         try:
             self._report_server = asyncio.create_task(
@@ -249,7 +259,14 @@ class DfLootPlugin(Star):
             if not got:
                 got = str(body.get("token") or "")
 
-            if expect and got != expect:
+            # 双重保险：配置异常为空时一律拒绝，绝不裸奔
+            if not expect:
+                logger.warning("[df_loot] 上报被拒：服务端未配置 Token")
+                return web.json_response(
+                    {"ok": False, "error": "server token not configured"},
+                    status=503,
+                )
+            if got != expect:
                 logger.warning("[df_loot] 上报被拒：Token 不匹配")
                 return web.json_response({"ok": False, "error": "invalid token"}, status=401)
 
