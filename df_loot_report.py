@@ -36,12 +36,7 @@ from __future__ import annotations
 
 from typing import Any
 
-try:
-    from astrbot.api import logger
-except ImportError:
-    import logging
-
-    logger = logging.getLogger("astrbot.df_loot")
+from astrbot.api import logger
 
 try:
     from .df_loot_core import LootBattle, LootItem
