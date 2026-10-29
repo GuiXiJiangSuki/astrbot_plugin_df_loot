@@ -51,7 +51,7 @@
 
 ## 播报效果
 
-![播报效果示例](https://raw.githubusercontent.com/GuiXiJiangSuki/astrbot_plugin_df_loot/main/docs/demo-card.png)
+![播报效果示例](docs/demo-card.png)
 
 出红装或房卡时，自动推送这样一张卡片到群里：显示角色名、撤离状态、击杀数、带出总价值，以及每件红装 / 房卡的图标、名称、数量和单价。
 
