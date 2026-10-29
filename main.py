@@ -10,6 +10,11 @@ import base64
 import inspect
 from typing import Any
 
+try:
+    import aiohttp
+except ImportError:  # 理论上 AstrBot 环境自带；缺失时相关功能降级
+    aiohttp = None  # type: ignore[assignment]
+
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
@@ -969,6 +974,110 @@ class DfLootPlugin(Star):
                 out.append(p)
         return out
 
+    @property
+    def rank_base(self) -> str:
+        """排行服务地址（用于 /df 今日战绩 查询）。"""
+        return "http://df.guixijiang.cn:8799"
+
+    async def _fetch_rank_player(self, name: str, rng: str = "today"):
+        """按游戏 ID 从排行服务查询玩家数据。"""
+        if aiohttp is None:
+            logger.error("[df_loot] 缺少 aiohttp 依赖，无法查询排行")
+            return None
+        url = f"{self.rank_base}/api/player"
+        params = {"name": name, "range": rng}
+        try:
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.get(url, params=params) as resp:
+                    if resp.status != 200:
+                        logger.warning("[df_loot] 排行查询返回 %s", resp.status)
+                        return None
+                    return await resp.json(content_type=None)
+        except asyncio.TimeoutError:
+            logger.warning("[df_loot] 排行查询超时")
+            return None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[df_loot] 排行查询异常: %s", exc)
+            return None
+
+    @staticmethod
+    def _fmt_money(v) -> str:
+        """金额格式化：1.2亿 / 3430.3万 / -451.7万 / 12,345。"""
+        try:
+            n = float(v or 0)
+        except (TypeError, ValueError):
+            return "0"
+        sign = "-" if n < 0 else ""
+        n = abs(n)
+        if n >= 1e8:
+            s = f"{n / 1e8:.2f}".rstrip("0").rstrip(".")
+            return f"{sign}{s}亿"
+        if n >= 1e4:
+            s = f"{n / 1e4:.1f}".rstrip("0").rstrip(".")
+            return f"{sign}{s}万"
+        return f"{sign}{int(n):,}"
+
+    def _build_rank_text(self, data, query: str) -> str:
+        """把排行服务返回的数据渲染成文字。"""
+        if not data or not data.get("ok"):
+            return "查询失败，排行服务暂时不可用，请稍后再试。"
+
+        if not data.get("found"):
+            return (
+                f"未找到玩家「{query}」今日的出货数据。\n\n"
+                "⚠️ 只有使用 delta-force-overlay 软件并开启排行榜同步的玩家才能查询到数据。\n"
+                "如需参与，请在软件「出货播报 → 今日出货排行榜」中打开同步开关。"
+            )
+
+        p = data.get("player") or {}
+        name = p.get("name") or query
+        gained = p.get("gained") or 0
+        profit = p.get("profit") or 0
+        battles = p.get("battles") or 0
+        escapes = p.get("escapes") or 0
+        red = p.get("redCount") or 0
+        keys = p.get("keyCount") or 0
+        rank = p.get("rank") or 0
+        online = p.get("online")
+
+        lines = [
+            f"【{name}】今日出货战绩",
+            "",
+            f"带出总计：{self._fmt_money(gained)} 哈夫币",
+            f"净收益：{'+' if profit >= 0 else ''}{self._fmt_money(profit)}",
+            f"对局数：{battles} 局 · 撤离 {escapes} 次",
+            f"红装：{red} 件 · 房卡：{keys} 件",
+        ]
+        if rank:
+            lines.append(f"今日排名：第 {rank} 名")
+        if online is not None:
+            lines.append(f"在线状态：{'在线' if online else '离线'}")
+
+        red_items = p.get("redItems") or []
+        if red_items:
+            lines.append("")
+            lines.append("出货明细（红）：")
+            for it in red_items[:5]:
+                n = it.get("num") or 1
+                num_txt = f" ×{n}" if n > 1 else ""
+                lines.append(f"  · {it.get('name') or '?'}{num_txt} — {self._fmt_money(it.get('total'))}")
+
+        key_items = p.get("keyItems") or []
+        if key_items:
+            lines.append("")
+            lines.append("出货明细（房卡）：")
+            for it in key_items[:5]:
+                n = it.get("num") or 1
+                num_txt = f" ×{n}" if n > 1 else ""
+                lines.append(f"  · {it.get('name') or '?'}{num_txt} — {self._fmt_money(it.get('total'))}")
+
+        lines.append("")
+        lines.append("————————————")
+        lines.append("⚠️ 数据来自 delta-force-overlay 软件上传的对局记录")
+        lines.append("只有使用该软件并开启排行榜同步的玩家才能查询到数据")
+        return "\n".join(lines)
+
     def _is_debug_group(self, event: AstrMessageEvent) -> bool:
         """是否是调试群。"""
         gid = self._group_key(event)
@@ -993,6 +1102,7 @@ class DfLootPlugin(Star):
                 "/df 退订 — 本群取消正式播报\n"
                 "/df 上报测试 — 把本群设为「软件测试上报」推送群\n"
                 "/df 取消上报测试 — 取消本群测试推送\n"
+                "/df 今日战绩 <游戏ID> — 查询该玩家今日出货战绩\n"
                 "/df 测试 — 用当前数据渲染一张卡片（需调试群）"
             )
             return
@@ -1089,6 +1199,22 @@ class DfLootPlugin(Star):
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[df_loot] 手动日报失败: %s", exc)
                 yield event.plain_result(f"日报失败：{exc}")
+            return
+
+        if sub in ("今日战绩", "战绩", "查询"):
+            target = " ".join(args[1:]).strip()
+            if not target:
+                yield event.plain_result(
+                    "用法：/df 今日战绩 <游戏ID>\n"
+                    "例如：/df 今日战绩 鬼汐酱\n\n"
+                    "⚠️ 只有使用 delta-force-overlay 软件并开启排行榜同步的玩家才能查询到数据"
+                )
+                return
+            data = await self._fetch_rank_player(target, "today")
+            if data is None:
+                yield event.plain_result("查询失败，排行服务暂时不可用，请稍后再试。")
+                return
+            yield event.plain_result(self._build_rank_text(data, target))
             return
 
         if sub == "测试":
