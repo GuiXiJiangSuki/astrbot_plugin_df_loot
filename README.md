@@ -51,18 +51,9 @@
 
 ## 播报效果
 
-```
-┌────────────────────────────────────────────┐
-│  (头像)  鬼汐酱                    带出     │
-│          撤离成功 · 2 杀          300.4万   │
-├────────────────────────────────────────────┤
-│  [红 2]  [房卡 1]                          │
-│  🖼 克劳迪乌斯半身像  [红]        132.4万   │
-│  🖼 军用控制终端      [红]         38.1万   │
-│  🖼 食堂洗碗间        [房卡]      133.7万   │
-│  🖼 单反相机 ×2                    27.5万   │
-└────────────────────────────────────────────┘
-```
+![播报效果示例](https://raw.githubusercontent.com/GuiXiJiangSuki/astrbot_plugin_df_loot/main/docs/demo-card.png)
+
+出红装或房卡时，自动推送这样一张卡片到群里：显示角色名、撤离状态、击杀数、带出总价值，以及每件红装 / 房卡的图标、名称、数量和单价。
 
 ---
 
@@ -81,15 +72,93 @@ git clone https://github.com/GuiXiJiangSuki/astrbot_plugin_df_loot.git
 
 或直接下载 ZIP 解压到 `AstrBot/data/plugins/astrbot_plugin_df_loot/`。
 
-### 依赖
+### 依赖安装（重要）
+
+**图片卡片渲染依赖 Pillow 和中文字体**，缺了会退回纯文字。按你的部署方式选一种：
+
+#### 方式 A：Docker 部署 AstrBot（推荐）
+
+进入容器安装：
 
 ```bash
-pip install aiohttp
+docker exec -it astrbot bash
+
+# 安装 Python 依赖
+pip install aiohttp pillow
+
+# 安装中文字体（Debian/Ubuntu 系）
+apt update && apt install -y fonts-noto-cjk
+
+# 验证
+python3 -c "import PIL; print('Pillow', PIL.__version__)"
+fc-list :lang=zh | head -3
 ```
 
-> AstrBot 通常已内置 `aiohttp`，缺失时才需要装。
+> ⚠️ 容器重建后需要重新安装。建议写进 Dockerfile 或用 volume 持久化。
 
-安装后**重启 AstrBot**，在插件管理里启用「三角洲出货播报」。
+#### 方式 B：源码 / 裸机部署
+
+```bash
+pip install aiohttp pillow
+
+# Linux 装中文字体
+sudo apt update && sudo apt install -y fonts-noto-cjk
+
+# Windows 系统自带微软雅黑，一般无需额外安装
+```
+
+#### 依赖说明
+
+| 依赖 | 用途 | 缺失后果 |
+|---|---|---|
+| `aiohttp` | 请求 overlay / 排行服务 | 无法获取数据，插件不可用 |
+| `Pillow` | 绘制卡片图片 | **退回纯文字播报** |
+| 中文字体 | 卡片显示中文 | **中文变成方块或空白** |
+
+#### 常见问题：卡片渲染不出来
+
+**症状**：群里只收到文字，没有图片卡片。
+
+**排查步骤**：
+
+```bash
+# 1. 检查 Pillow 是否安装
+docker exec astrbot python3 -c "import PIL; print(PIL.__version__)"
+
+# 2. 检查中文字体是否存在
+docker exec astrbot fc-list :lang=zh
+
+# 3. 看插件日志里的具体报错
+docker logs astrbot 2>&1 | grep -i "渲染\|render\|font" | tail -20
+```
+
+**常见原因**：
+
+| 报错 / 现象 | 原因 | 解决 |
+|---|---|---|
+| `No module named PIL` | 没装 Pillow | `pip install pillow` |
+| `No module named aiohttp` | 没装 aiohttp | `pip install aiohttp` |
+| 中文显示成方块 | 缺中文字体 | `apt install fonts-noto-cjk` |
+| 字体路径找不到 | 字体不在候选路径 | 见下方「自定义字体路径」 |
+| 卡片完全没发出来 | 渲染抛异常 | 看日志，插件会自动退回纯文字 |
+
+**自定义字体路径**：
+
+插件会依次尝试以下路径，你的系统字体在别处时可以建软链接：
+
+```
+/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc
+/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc
+/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc
+C:\\Windows\\Fonts\\msyhbd.ttc   (Windows)
+```
+
+```bash
+# 例：字体在别的路径，建软链接到候选位置
+ln -s /your/font/path.ttc /usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc
+```
+
+安装完依赖后**重启 AstrBot**，在插件管理里启用「三角洲出货播报」。
 
 ---
 
