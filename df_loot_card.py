@@ -328,7 +328,7 @@ def render_card(
     # ── 页脚 ──
     f_foot = _font(S_(12))
     d.text((S_(PAD), Hp - S_(24)), battle.time or "", font=f_foot, fill=SUB_DIM)
-    foot_r = "三角洲行动 · 出货播报"
+    foot_r = "astrbot_plugin_df_loot"
     fb = d.textbbox((0, 0), foot_r, font=f_foot)
     d.text((Wp - S_(PAD) - (fb[2] - fb[0]), Hp - S_(24)), foot_r, font=f_foot, fill=SUB_DIM)
 
