@@ -36,6 +36,8 @@ try:
         render_daily_card,
     )
     from .df_loot_daily import fetch_daily_summary
+    from . import df_loot_xb
+    from .df_loot_zb_card import render_zhanbei
     from .df_loot_report import parse_report
     from .df_loot_sample import random_battle
 except ImportError:
@@ -54,6 +56,8 @@ except ImportError:
         render_daily_card,
     )
     from df_loot_daily import fetch_daily_summary
+    import df_loot_xb
+    from df_loot_zb_card import render_zhanbei
     from df_loot_report import parse_report
     from df_loot_sample import random_battle
 
@@ -286,8 +290,15 @@ class DfLootPlugin(Star):
                 )
 
             self._tracker.mark(battle.room_id)
-            # 软件里点「测试上报」会带 isTest=true → 只发测试群，不动正式播报群
-            is_test = bool(body.get("isTest"))
+            # 测试判定（任一命中即视为测试，只发测试群，绝不打扰正式播报群）：
+            #   1. 软件里点「测试上报」→ 带 isTest=true
+            #   2. roomId 以 test_ / test- 开头（软件测试上报的固定格式）
+            #   3. 显式传 isTest 字段（任意真值）
+            is_test = (
+                bool(body.get("isTest"))
+                or str(battle.room_id).lower().startswith("test_")
+                or str(battle.room_id).lower().startswith("test-")
+            )
             should = True if is_test else self._should_broadcast(battle)
             logger.info(
                 "[df_loot] 收到上报%s %s · %s · 红%d 卡%d · 带出%s · 播报=%s",
@@ -545,6 +556,10 @@ class DfLootPlugin(Star):
 
     def _should_broadcast(self, battle: LootBattle) -> bool:
         """判定这局是否要播报。"""
+        # 总开关（关闭后不播报任何出货）
+        if not self.broadcast_enabled:
+            return False
+
         enable_red = bool(self._cfg("df_enable_red", True))
         enable_key = bool(self._cfg("df_enable_keycard", True))
         only_escape = bool(self._cfg("df_only_escape", False))
@@ -604,9 +619,17 @@ class DfLootPlugin(Star):
         # 渲染（PIL 直接画，清晰且无白边）
         image_comp = None
         text_comp = None
+        # 播报样式：
+        #   card → 只发图片
+        #   text → 只发文字
+        #   all  → 文字 + 图片都发
         render_mode = str(self._cfg("df_render_mode", "card")).strip().lower()
+        if render_mode not in ("card", "text", "all"):
+            render_mode = "card"
+        want_image = render_mode in ("card", "all")
+        want_text = render_mode in ("text", "all")
 
-        if render_mode != "text":
+        if want_image:
             try:
                 png = render_card(
                     battle,
@@ -619,14 +642,18 @@ class DfLootPlugin(Star):
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[df_loot] 卡片渲染失败，退回文字: %s", exc)
 
-        # 文字摘要
-        if render_mode != "text" and self._cfg("df_attach_text", True):
+        # 文字摘要（card 模式下由 df_attach_text 控制；all 模式强制带文字）
+        if want_image and render_mode != "all" and self._cfg("df_attach_text", True):
             brief = build_brief_text(battle)
             if brief:
                 text_comp = Plain(brief)
 
-        # 纯文字模式 / 渲染失败
-        if image_comp is None:
+        # 纯文字 / all 模式：发完整文字
+        if want_text:
+            text_comp = Plain(build_text_message(battle))
+
+        # 渲染失败兜底
+        if image_comp is None and text_comp is None:
             text_comp = Plain(build_text_message(battle))
 
         # 组装：文字和图片分成两条发（QQ 官方富媒体消息的 content 常被丢弃，
@@ -639,12 +666,16 @@ class DfLootPlugin(Star):
             send_groups = [[text_comp]]
 
         # 逐个群发送
+        # 文字和图片分两条发；每条之间留间隔，避免被 QQ 合并成一条
         at_all = bool(self._cfg("df_at_all", False)) and bool(battle.reds)
         sent = 0
         for gid in groups:
             try:
                 ok = False
                 for i, chain in enumerate(send_groups):
+                    # 第二条起先等 1.2 秒，让平台识别为独立消息
+                    if i > 0:
+                        await asyncio.sleep(1.2)
                     # @全体只加在第一条
                     ok = await self._send_to_group(
                         gid, chain, at_all=(at_all and i == 0)
@@ -655,6 +686,9 @@ class DfLootPlugin(Star):
                     sent += 1
                 else:
                     logger.warning("[df_loot] 群 %s 发送未成功（可能被平台限制）", gid)
+                # 群与群之间也留间隔，避免触发频率限制
+                if len(groups) > 1:
+                    await asyncio.sleep(0.8)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[df_loot] 发送到群 %s 失败: %s", gid, exc)
 
@@ -763,8 +797,15 @@ class DfLootPlugin(Star):
             ret = await api.post_group_message(
                 group_openid=group_openid, **payload
             )
-            logger.info("[df_loot] 直连发送成功 group=%s ret=%s",
-                        str(group_openid)[:24], type(ret).__name__)
+            # 打印返回详情，便于排查纯文字是否被平台丢弃
+            try:
+                ret_id = getattr(ret, "id", None) or (ret.get("id") if isinstance(ret, dict) else None)
+                ret_ts = getattr(ret, "timestamp", None) or (ret.get("timestamp") if isinstance(ret, dict) else None)
+                logger.info("[df_loot] 直连发送成功 group=%s msg_type=%s id=%s ts=%s",
+                            str(group_openid)[:24], payload.get("msg_type"), ret_id, ret_ts)
+            except Exception:  # noqa: BLE001
+                logger.info("[df_loot] 直连发送成功 group=%s msg_type=%s ret=%s",
+                            str(group_openid)[:24], payload.get("msg_type"), type(ret).__name__)
             return True
         except Exception as exc:  # noqa: BLE001
             logger.warning("[df_loot] 直连发送失败(群 %s): %s",
@@ -1078,6 +1119,219 @@ class DfLootPlugin(Star):
         lines.append("只有使用该软件并开启排行榜同步的玩家才能查询到数据")
         return "\n".join(lines)
 
+    # ── 卡战备 ──
+    @property
+    def broadcast_enabled(self) -> bool:
+        """出货播报总开关。"""
+        return bool(self._cfg("df_broadcast_enabled", True))
+
+    @property
+    def zhanbei_source(self) -> str:
+        """卡战备数据源：xb（直连小黑盒）或 overlay（中转）。"""
+        v = str(self._cfg("df_zhanbei_source", "xb") or "xb").strip().lower()
+        return "overlay" if v == "overlay" else "xb"
+
+    @staticmethod
+    def _parse_zb_value(text: str) -> int:
+        """解析用户输入的价值：60w / 60万 / 600000 → 整数。"""
+        return df_loot_xb.parse_value(text)
+
+    @staticmethod
+    def _pick_zb_level(value: int):
+        """按目标价值选最接近的档位，返回 (fake_level, target, label)。"""
+        return df_loot_xb.pick_level(value)
+
+    async def _fetch_zhanbei(self, level: int):
+        """拉取指定档位的卡战备方案。
+
+        数据源由配置 df_zhanbei_source 决定：
+          xb      → 插件直连小黑盒（不需要运行软件）
+          overlay → 通过 delta-force-overlay 中转（需要软件运行）
+        """
+        if self.zhanbei_source == "overlay":
+            return await self._fetch_zhanbei_overlay(level)
+        return await self._fetch_zhanbei_direct(level)
+
+    async def _fetch_zhanbei_direct(self, level: int):
+        """直连小黑盒。"""
+        try:
+            raw = await df_loot_xb.fetch_level(level)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[df_loot] 小黑盒直连查询异常: %s", exc)
+            return None
+        if not raw:
+            return None
+        target = 0
+        for lv, tv, _lbl in df_loot_xb.XB_LEVELS:
+            if lv == level:
+                target = tv
+                break
+        schemes = []
+        for g in raw:
+            schemes.append(df_loot_xb.to_scheme(g, target, "xb"))
+        return {"ok": True, "schemes": schemes, "source": "xb"}
+
+    async def _fetch_zhanbei_overlay(self, level: int):
+        """通过 delta-force-overlay 中转。
+
+        overlay 的 lv 是「ZB_TARGETS 下标」（0-4），
+        而小黑盒直连用的是 fake_level（0,1,2,3,5），需要转换。
+        """
+        if aiohttp is None:
+            logger.error("[df_loot] 缺少 aiohttp 依赖")
+            return None
+        base = str(self.overlay_url or "").rstrip("/")
+        if not base:
+            return None
+
+        # fake_level → overlay lv 下标
+        lv_map = {0: 0, 1: 1, 2: 2, 3: 3, 5: 4}
+        ov_lv = lv_map.get(level, 0)
+
+        url = f"{base}/api/zhanbei"
+        params = {"src": "xb", "lv": str(ov_lv)}
+        try:
+            timeout = aiohttp.ClientTimeout(total=45)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.get(url, params=params) as resp:
+                    if resp.status != 200:
+                        logger.warning("[df_loot] overlay 卡战备返回 %s", resp.status)
+                        return None
+                    j = await resp.json(content_type=None)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[df_loot] overlay 卡战备查询异常: %s", exc)
+            return None
+
+        if not isinstance(j, dict) or not j.get("ok"):
+            return None
+
+        # 转换 overlay 格式 → 统一格式
+        groups = {g.get("key"): g.get("name") for g in (j.get("groups") or [])}
+        schemes = []
+        for sc in (j.get("schemes") or []):
+            stype = sc.get("schemeType") or ""
+            items = []
+            for it in (sc.get("schemeItems") or []):
+                items.append({
+                    "name": str(it.get("objectName") or ""),
+                    "grade": int(it.get("objectGrade") or 0),
+                    "pic": str(it.get("objectPic") or ""),
+                    "cost": int(it.get("costHafCoin") or 0),
+                    "value": int(it.get("currentValue") or 0),
+                    "diff": int(it.get("diffValue") or 0),
+                })
+            schemes.append({
+                "targetValue": int(sc.get("targetValue") or 0),
+                "totalCost": int(sc.get("totalHafCost") or 0),
+                "currentValue": int(sc.get("currentValue") or 0),
+                "schemeKey": stype,
+                "schemeName": groups.get(stype) or "方案",
+                "updatedAt": 0,
+                "items": items,
+            })
+        return {"ok": True, "schemes": schemes, "source": "overlay"}
+
+    async def _fetch_zb_pics(self, schemes: list) -> dict:
+        """下载卡战备物品图标（并发，失败忽略）。"""
+        if aiohttp is None:
+            return {}
+        urls = set()
+        for sc in schemes:
+            for it in (sc.get("items") or []):
+                pic = str(it.get("pic") or "")
+                if pic.startswith("http"):
+                    urls.add(pic)
+        if not urls:
+            return {}
+
+        out = {}
+        try:
+            timeout = aiohttp.ClientTimeout(total=25)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async def one(u):
+                    try:
+                        async with sess.get(u) as r:
+                            if r.status == 200:
+                                out[u] = await r.read()
+                    except Exception:  # noqa: BLE001
+                        pass
+                import asyncio as _aio
+                await _aio.gather(*[one(u) for u in urls])
+        except Exception:  # noqa: BLE001
+            pass
+        return out
+
+    def _load_logo(self):
+        """读取插件目录下的 logo.png（软件图标）。"""
+        try:
+            import os as _os
+            base = _os.path.dirname(_os.path.abspath(__file__))
+            path = _os.path.join(base, "logo.png")
+            if _os.path.exists(path):
+                with open(path, "rb") as f:
+                    return f.read()
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    def _build_zhanbei_brief(self, data, label: str) -> str:
+        """图片前的简版文字摘要。"""
+        schemes = (data or {}).get("schemes") or []
+        if not schemes:
+            return ""
+        parts = [f"【卡战备 · 目标 {label}】"]
+        for sc in schemes:
+            nm = sc.get("schemeName") or "方案"
+            cost = self._fmt_money(sc.get("totalCost") or 0)
+            cur = self._fmt_money(sc.get("currentValue") or 0)
+            parts.append(f"{nm}：成本 {cost} · 价值 {cur}")
+        return "\n".join(parts)
+
+    def _build_zhanbei_text(self, data, label: str, want_value: int) -> str:
+        """渲染卡战备文字。"""
+        if not data or not data.get("ok"):
+            return "卡战备查询失败，小黑盒接口暂时不可用，请稍后再试。"
+
+        schemes = data.get("schemes") or []
+        if not schemes:
+            return "暂无卡战备数据，请稍后再试。"
+
+        lines = [
+            f"【卡战备 · 目标 {label}】",
+            "（数据来自小黑盒，按装备价值配装）",
+            "",
+        ]
+
+        for sc in schemes:
+            gname = sc.get("schemeName") or "方案"
+            cost = sc.get("totalCost") or 0
+            cur = sc.get("currentValue") or 0
+            items = sc.get("items") or []
+
+            lines.append(f"━━ {gname} ━━")
+            lines.append(
+                f"配装成本 {self._fmt_money(cost)} · 当前价值 {self._fmt_money(cur)}"
+            )
+            # 小黑盒原始数据可能有重复项，按名称去重
+            seen = set()
+            for it in items:
+                nm = it.get("name") or "?"
+                if nm in seen:
+                    continue
+                seen.add(nm)
+                ic = it.get("cost") or 0
+                lines.append(f"  · {nm} — {self._fmt_money(ic)}")
+            lines.append("")
+
+        lines.append("————————————")
+        # 数据来源标注（与图片版保持一致）
+        src_tag = (data or {}).get("source") or "xb"
+        if src_tag == "overlay":
+            lines.append("由 delta-force-overlay 服务端提供数据源")
+        else:
+            lines.append("由小黑盒直接提供数据源")
+        return "\n".join(lines)
+
     def _is_debug_group(self, event: AstrMessageEvent) -> bool:
         """是否是调试群。"""
         gid = self._group_key(event)
@@ -1103,6 +1357,7 @@ class DfLootPlugin(Star):
                 "/df 上报测试 — 把本群设为「软件测试上报」推送群\n"
                 "/df 取消上报测试 — 取消本群测试推送\n"
                 "/df 今日战绩 <游戏ID> — 查询该玩家今日出货战绩\n"
+                "/df 卡战备 <11/18/55/60/78w> — 查询卡战备配装（如 60w）\n"
                 "/df 测试 — 用当前数据渲染一张卡片（需调试群）"
             )
             return
@@ -1199,6 +1454,81 @@ class DfLootPlugin(Star):
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[df_loot] 手动日报失败: %s", exc)
                 yield event.plain_result(f"日报失败：{exc}")
+            return
+
+        if sub in ("卡战备", "战备"):
+            arg = " ".join(args[1:]).strip()
+            if not arg:
+                levels = " / ".join([x[2] for x in self.ZB_LEVELS])
+                yield event.plain_result(
+                    "用法：/df 卡战备 <11/18/55/60/78w>\n"
+                    f"可选档位：{levels}\n"
+                    "例如：/df 卡战备 60w\n"
+                    "支持写法：60w / 60万 / 60W / 600000\n\n"
+                    "会自动匹配最接近的档位"
+                )
+                return
+            want = self._parse_zb_value(arg)
+            if not want:
+                yield event.plain_result(
+                    f"无法识别价值「{arg}」\n"
+                    "请用 60w / 60万 / 600000 这样的格式"
+                )
+                return
+            lv, target, label = self._pick_zb_level(want)
+            yield event.plain_result(f"正在查询卡战备 {label} 配装…")
+            data = await self._fetch_zhanbei(lv)
+            if data is None:
+                if self.zhanbei_source == "overlay":
+                    yield event.plain_result(
+                        "查询失败：请确认 delta-force-overlay 正在运行且地址配置正确\n"
+                        "（可在插件配置里把「卡战备数据源」改成 xb 直连小黑盒）"
+                    )
+                else:
+                    yield event.plain_result(
+                        "查询失败，小黑盒接口暂时不可用，请稍后再试\n"
+                        "（可在插件配置里把「卡战备数据源」改成 overlay 中转）"
+                    )
+                return
+
+            # 遵循「播报样式」配置（与出货播报一致）：
+            #   card → 只发图片
+            #   text → 只发文字
+            #   all  → 文字 + 图片都发
+            mode = str(self._cfg("df_render_mode", "card")).strip().lower()
+            if mode not in ("card", "text", "all"):
+                mode = "card"
+            want_image = mode in ("card", "all")
+            want_text = mode in ("text", "all")
+
+            png = None
+            if want_image:
+                try:
+                    schemes = data.get("schemes") or []
+                    pics = await self._fetch_zb_pics(schemes)
+                    png = render_zhanbei(
+                        label=label,
+                        target=target,
+                        schemes=schemes,
+                        source=data.get("source") or "xb",
+                        max_items=8,
+                        item_pics=pics,
+                        logo=self._load_logo(),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[df_loot] 卡战备渲染失败，退回文字: %s", exc)
+                    png = None
+                    want_text = True   # 渲染失败必须给文字，否则没响应
+
+            # 文字部分
+            if want_text or (want_image and png is None):
+                yield event.plain_result(self._build_zhanbei_text(data, label, want))
+
+            # 图片部分
+            if want_image and png is not None:
+                yield event.chain_result(
+                    [Image.fromBase64(base64.b64encode(png).decode("ascii"))]
+                )
             return
 
         if sub in ("今日战绩", "战绩", "查询"):
