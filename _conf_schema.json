@@ -5,6 +5,33 @@
     "default": "http://192.168.1.5:8788",
     "hint": "delta-force-overlay 的地址。插件通过 /api/state 读取对局数据。示例：http://192.168.1.5:8788"
   },
+  "df_broadcast_enabled": {
+    "description": "出货播报开关",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后不再自动播报出货（/df 卡战备、/df 今日战绩 等查询命令不受影响）"
+  },
+  "df_zhanbei_source": {
+    "description": "卡战备数据源",
+    "type": "string",
+    "default": "xb",
+    "options": [
+      "xb",
+      "overlay"
+    ],
+    "hint": "xb = 插件直连小黑盒（推荐，不需要运行软件）；overlay = 通过 delta-force-overlay 中转（需要软件运行）"
+  },
+  "df_render_mode": {
+    "description": "播报样式",
+    "type": "string",
+    "default": "card",
+    "options": [
+      "card",
+      "text",
+      "all"
+    ],
+    "hint": "card = 只发图片卡片；text = 只发文字；all = 文字 + 图片都发"
+  },
   "df_broadcast_groups": {
     "description": "播报目标群",
     "type": "list",
@@ -40,12 +67,6 @@
     "type": "int",
     "default": 30,
     "hint": "多久检查一次 overlay 的新对局。建议 20-60 秒"
-  },
-  "df_render_mode": {
-    "description": "播报样式",
-    "type": "string",
-    "default": "card",
-    "hint": "card=图片卡片（需要 AstrBot 的 html_render）；text=纯文字。填 card 或 text"
   },
   "df_show_avatar": {
     "description": "卡片显示账号头像",
