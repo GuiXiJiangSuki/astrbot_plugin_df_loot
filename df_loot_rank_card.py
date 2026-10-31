@@ -33,6 +33,7 @@ SUB = (154, 165, 181)
 DIM = (95, 104, 117)
 RED = (255, 110, 110)
 BLUE = (126, 200, 255)
+GREEN = (74, 222, 128)
 
 
 def _grad_bg(w: int, h: int) -> Image.Image:
@@ -168,7 +169,7 @@ def render_rank_daily(
     W = 960
     PAD = 20
     HEAD_H = 96
-    ROW_HEAD = 92
+    ROW_HEAD = 104
     GROUP_LABEL_H = 32
     ROW_H = 64
     ROW_GAP = 8
@@ -240,6 +241,7 @@ def render_rank_daily(
         rank = int(p.get("rank") or (idx + 1))
         name = str(p.get("name") or "未知玩家")
         gained = int(p.get("gained") or 0)
+        profit = int(p.get("profit") or 0)
         battles = int(p.get("battles") or 0)
         escapes = int(p.get("escapes") or 0)
         red_n = int(p.get("redCount") or 0)
@@ -267,18 +269,27 @@ def render_rank_daily(
         nx = av_x + av_sz + 12
         d.text((S(nx), S(y + 22)), name, font=_font(S(20)), fill=TEXT)
 
-        meta = f"{battles} 局 · 撤离 {escapes}"
+        esc_pct = round(escapes / battles * 100) if battles else 0
+        meta = f"{battles} 局 · 撤离率 {esc_pct}%"
         if red_n:
             meta += f" · 红 {red_n}"
         if key_n:
             meta += f" · 卡 {key_n}"
         d.text((S(nx), S(y + 52)), meta, font=_font(S(15), False), fill=SUB)
 
+        # 右侧：带出价值（大字）
         gs = _fmt_amount(gained)
-        gw = d.textlength(gs, font=_font(S(22)))
-        d.text((S(W - PAD - 18) - gw, S(y + 22)), gs, font=_font(S(27)), fill=GOLD)
+        gw = d.textlength(gs, font=_font(S(27)))
+        d.text((S(W - PAD - 18) - gw, S(y + 16)), gs, font=_font(S(27)), fill=GOLD)
         lw = d.textlength("带出", font=_font(S(12), False))
-        d.text((S(W - PAD - 18) - lw, S(y + 58)), "带出", font=_font(S(12), False), fill=DIM)
+        d.text((S(W - PAD - 18) - lw, S(y + 48)), "带出", font=_font(S(12), False), fill=DIM)
+
+        # 右侧：净收益（绿色小字，在带出下方）
+        if profit:
+            ps = "净收益 " + _fmt_amount(profit)
+            pw = d.textlength(ps, font=_font(S(13)))
+            d.text((S(W - PAD - 18) - pw, S(y + 66)), ps,
+                   font=_font(S(13)), fill=GREEN)
 
         # ── 物品区 ──
         iy = y + ROW_HEAD
