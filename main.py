@@ -478,10 +478,16 @@ class DfLootPlugin(Star):
             rank = p.get("rank") or (i + 1)
             name = p.get("name") or "未知"
             gained = self._fmt_money(p.get("gained") or 0)
+            profit = self._fmt_money(p.get("profit") or 0)
             battles = p.get("battles") or 0
+            escapes = p.get("escapes") or 0
             red_n = p.get("redCount") or 0
             key_n = p.get("keyCount") or 0
-            lines.append(f"#{rank} {name} — 带出 {gained}（{battles} 局）")
+            esc_pct = round(escapes / battles * 100) if battles else 0
+            lines.append(
+                f"#{rank} {name} — 带出 {gained} · 净收益 {profit}"
+                f"（{battles} 局 · 撤离率 {esc_pct}%）"
+            )
             reds = p.get("redItems") or []
             if reds:
                 names = "、".join(
