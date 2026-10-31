@@ -1,9 +1,9 @@
 name: astrbot_plugin_df_loot
 display_name: "三角洲出货播报"
 author: "GuiXiJiang"
-desc: "监控三角洲行动对局，出红/房卡时自动推送到 QQ 群；支持查询今日战绩、卡战备配装方案"
-short_desc: "三角洲出货播报 + 战绩/卡战备查询"
-version: "1.0.3"
+desc: "监控三角洲行动对局，出红/房卡时自动推送到 QQ 群；支持今日战绩、卡战备配装、出货排行榜查询"
+short_desc: "三角洲出货播报 + 战绩/卡战备/排行榜查询"
+version: "1.0.4"
 astrbot_version: ">=4.25.3,<5"
 repo: "https://github.com/GuiXiJiangSuki/astrbot_plugin_df_loot"
 support_platforms:
