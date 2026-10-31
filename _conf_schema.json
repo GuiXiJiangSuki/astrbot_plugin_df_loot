@@ -93,10 +93,10 @@
     "hint": "出红时 @全体成员。注意：频繁 @全体可能被腾讯限制"
   },
   "df_daily_enabled": {
-    "description": "每日出货汇总",
+    "description": "每日排行榜出货汇总",
     "type": "bool",
     "default": true,
-    "hint": "每天晚上定时向所有播报群推送当日出货汇总（局数/红/房卡/净收益）"
+    "hint": "每天晚上定时向所有播报群推送今日出货排行榜 TOP 5，每人展开显示出了什么红装/房卡"
   },
   "df_daily_time": {
     "description": "每日汇总时间",
