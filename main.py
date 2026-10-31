@@ -38,6 +38,7 @@ try:
     from .df_loot_daily import fetch_daily_summary
     from . import df_loot_xb
     from .df_loot_zb_card import render_zhanbei
+    from .df_loot_rank_card import render_rank_daily
     from .df_loot_report import parse_report
     from .df_loot_sample import random_battle
 except ImportError:
@@ -58,6 +59,7 @@ except ImportError:
     from df_loot_daily import fetch_daily_summary
     import df_loot_xb
     from df_loot_zb_card import render_zhanbei
+    from df_loot_rank_card import render_rank_daily
     from df_loot_report import parse_report
     from df_loot_sample import random_battle
 
@@ -390,61 +392,190 @@ class DfLootPlugin(Star):
         except Exception as exc:  # noqa: BLE001
             logger.warning("[df_loot] 注册日报任务失败: %s", exc)
 
-    async def _daily_report(self) -> None:
-        """每日汇总播报（由 cron 触发）。"""
-        groups = self.groups
+    async def _fetch_rank_top(self, limit: int = 5) -> list:
+        """从排行服务拉今日 TOP N。"""
+        if aiohttp is None:
+            return []
+        url = f"{self.rank_base}/api/rank/range"
+        params = {"range": "today", "limit": str(limit)}
+        try:
+            timeout = aiohttp.ClientTimeout(total=20)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.get(url, params=params) as resp:
+                    if resp.status != 200:
+                        logger.warning("[df_loot] 排行接口返回 %s", resp.status)
+                        return []
+                    j = await resp.json(content_type=None)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[df_loot] 拉取排行失败: %s", exc)
+            return []
+        if not isinstance(j, dict) or not j.get("ok"):
+            return []
+        return j.get("list") or []
+
+    async def _fetch_rank_pics(self, players: list) -> dict:
+        """下载排行里红/卡物品图标。"""
+        if aiohttp is None:
+            return {}
+        urls = set()
+        for p in players:
+            for it in (p.get("redItems") or []) + (p.get("keyItems") or []):
+                pic = str(it.get("pic") or "")
+                if pic.startswith("http"):
+                    urls.add(pic)
+        if not urls:
+            return {}
+        out = {}
+        try:
+            timeout = aiohttp.ClientTimeout(total=25)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async def one(u):
+                    try:
+                        async with sess.get(u) as r:
+                            if r.status == 200:
+                                out[u] = await r.read()
+                    except Exception:  # noqa: BLE001
+                        pass
+                await asyncio.gather(*[one(u) for u in urls])
+        except Exception:  # noqa: BLE001
+            pass
+        return out
+
+    async def _fetch_rank_avatars(self, players: list) -> dict:
+        """下载玩家头像（圆形显示用）。"""
+        if aiohttp is None:
+            return {}
+        pairs = {}
+        for p in players:
+            pid = str(p.get("playerId") or "")
+            av = str(p.get("avatar") or "")
+            if pid and av.startswith("http"):
+                pairs[pid] = av
+        if not pairs:
+            return {}
+        out = {}
+        try:
+            timeout = aiohttp.ClientTimeout(total=20)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async def one(pid, u):
+                    try:
+                        async with sess.get(u) as r:
+                            if r.status == 200:
+                                out[pid] = await r.read()
+                    except Exception:  # noqa: BLE001
+                        pass
+                await asyncio.gather(*[one(k, v) for k, v in pairs.items()])
+        except Exception:  # noqa: BLE001
+            pass
+        return out
+
+    def _build_rank_daily_text(self, players: list, date: str) -> str:
+        """排行榜汇总的文字版。"""
+        if not players:
+            return f"【今日出货排行 · {date}】\n\n今天还没有玩家上榜。"
+        lines = [f"【今日出货排行 · {date}】", ""]
+        for i, p in enumerate(players[:5]):
+            rank = p.get("rank") or (i + 1)
+            name = p.get("name") or "未知"
+            gained = self._fmt_money(p.get("gained") or 0)
+            battles = p.get("battles") or 0
+            red_n = p.get("redCount") or 0
+            key_n = p.get("keyCount") or 0
+            lines.append(f"#{rank} {name} — 带出 {gained}（{battles} 局）")
+            reds = p.get("redItems") or []
+            if reds:
+                names = "、".join(
+                    f"{it.get('name')}×{it.get('num')}" if int(it.get("num") or 1) > 1 else str(it.get("name"))
+                    for it in reds[:4]
+                )
+                lines.append(f"   红：{names}")
+            keys = p.get("keyItems") or []
+            if keys:
+                names = "、".join(
+                    f"{it.get('name')}×{it.get('num')}" if int(it.get("num") or 1) > 1 else str(it.get("name"))
+                    for it in keys[:4]
+                )
+                lines.append(f"   卡：{names}")
+            lines.append("")
+        lines.append("————————————")
+        lines.append("数据来自各玩家软件自动上传")
+        return "\n".join(lines)
+
+    async def _daily_report(
+        self,
+        *,
+        test_only: bool = False,
+        target_groups: list | None = None,
+    ) -> None:
+        """每日排行榜出货汇总。
+
+        群选择优先级：
+          1. target_groups  —— 指定群（/df 今天排行 用：在哪个群发就回哪个群）
+          2. test_only      —— 只发测试群
+          3. 默认            —— 发所有播报群（cron 定时任务用）
+        """
+        if target_groups:
+            groups = list(target_groups)
+        elif test_only:
+            groups = self.report_test_groups
+        else:
+            groups = self.groups
+
         if not groups:
-            logger.info("[df_loot] 日报：没有配置播报群，跳过")
+            tag = "指定群" if target_groups else ("测试群" if test_only else "播报群")
+            logger.info("[df_loot] 排行日报：没有配置%s，跳过", tag)
             return
 
-        summary = await fetch_daily_summary(self.overlay_url)
-        if summary is None:
-            logger.warning("[df_loot] 日报：拉取今日数据失败，跳过")
+        players = await self._fetch_rank_top(5)
+        if not players:
+            logger.info("[df_loot] 排行日报：今日无人上榜，跳过")
             return
 
-        if summary.games == 0:
-            logger.info("[df_loot] 日报：今天没打，跳过")
-            return
+        from datetime import datetime
+        date = datetime.now().strftime("%Y-%m-%d")
 
-        # 文字 + 图片，分两条发
-        text = build_daily_text(summary)
+        # 下载物品图标 + 玩家头像
+        pics = await self._fetch_rank_pics(players)
+        avatars = await self._fetch_rank_avatars(players)
+        if pics:
+            logger.info("[df_loot] 排行日报：物品图 %s 张", len(pics))
+        if avatars:
+            logger.info("[df_loot] 排行日报：头像 %s 个", len(avatars))
 
-        # 下载物品图（红 + 房卡，最多 10 种）
-        item_pics: dict[str, bytes] = {}
-        if self._client is None:
-            self._client = OverlayClient(self.overlay_url)
-        wanted = [x for x in (summary.reds + summary.keys) if x.id][:10]
-        for it in wanted:
-            try:
-                data = await self._client.fetch_item_pic(it.id)
-            except Exception:  # noqa: BLE001
-                data = None
-            if data:
-                item_pics[it.id] = data
-        if wanted:
-            logger.info("[df_loot] 日报：物品图 %s/%s", len(item_pics), len(wanted))
+        text = self._build_rank_daily_text(players, date)
 
         image_comp = None
         try:
-            png = render_daily_card(summary, item_pics=item_pics)
+            png = render_rank_daily(
+                date=date,
+                players=players,
+                item_pics=pics,
+                avatars=avatars,
+                logo=self._load_logo(),
+                max_players=5,
+                per_row=3,
+            )
             image_comp = Image.fromBase64(base64.b64encode(png).decode("ascii"))
         except Exception as exc:  # noqa: BLE001
-            logger.warning("[df_loot] 日报卡片渲染失败: %s", exc)
+            logger.warning("[df_loot] 排行日报卡片渲染失败: %s", exc)
 
         sent = 0
         for gid in groups:
             try:
                 ok = await self._send_to_group(gid, [Plain(text)])
                 if ok and image_comp is not None:
+                    await asyncio.sleep(1.2)
                     await self._send_to_group(gid, [image_comp])
                 if ok:
                     sent += 1
+                if len(groups) > 1:
+                    await asyncio.sleep(0.8)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("[df_loot] 日报发送到群 %s 失败: %s", gid, exc)
+                logger.warning("[df_loot] 排行日报发送到群 %s 失败: %s", gid, exc)
 
         logger.info(
-            "[df_loot] 日报已推送 → %s 个群（%d 局 · 红%d · 卡%d）",
-            sent, summary.games, summary.red_count, summary.key_count,
+            "[df_loot] 排行日报已推送 → %s 个群（TOP %d）",
+            sent, len(players),
         )
 
     async def terminate(self) -> None:
@@ -1357,6 +1488,7 @@ class DfLootPlugin(Star):
                 "/df 上报测试 — 把本群设为「软件测试上报」推送群\n"
                 "/df 取消上报测试 — 取消本群测试推送\n"
                 "/df 今日战绩 <游戏ID> — 查询该玩家今日出货战绩\n"
+                "/df 今日排行 — 生成今日出货排行榜汇总\n"
                 "/df 卡战备 <11/18/55/60/78w> — 查询卡战备配装（如 60w）\n"
                 "/df 测试 — 用当前数据渲染一张卡片（需调试群）"
             )
@@ -1454,6 +1586,21 @@ class DfLootPlugin(Star):
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[df_loot] 手动日报失败: %s", exc)
                 yield event.plain_result(f"日报失败：{exc}")
+            return
+
+        if sub in ("今日排行", "今天排行", "今日榜", "今天榜",
+                   "排行", "排行榜", "榜单", "今日榜单", "今天榜单"):
+            # 在哪个群发命令，就只发回哪个群
+            cur_gid = self._group_key(event)
+            if not cur_gid:
+                yield event.plain_result("无法识别当前群，请在群里使用该命令")
+                return
+            yield event.plain_result("正在生成今日排行榜…")
+            try:
+                await self._daily_report(target_groups=[cur_gid])
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[df_loot] 今日排行失败: %s", exc)
+                yield event.plain_result(f"生成失败：{exc}")
             return
 
         if sub in ("卡战备", "战备"):
