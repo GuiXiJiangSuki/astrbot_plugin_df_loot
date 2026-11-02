@@ -143,7 +143,7 @@
   },
 
   "daily": {
-    "description": "⑤ 每日汇总",
+    "description": "⑤ 今日排行 / 每日汇总",
     "hint": "每晚定时推送今日出货排行榜",
     "type": "object",
     "items": {
@@ -158,6 +158,16 @@
         "type": "string",
         "default": "23:50",
         "hint": "24 小时制，格式 HH:MM。默认 23:50（晚上 11 点 50 分）"
+      },
+      "df_rank_sort": {
+        "description": "排行榜排序依据",
+        "type": "string",
+        "default": "gained",
+        "options": [
+          "gained",
+          "profit"
+        ],
+        "hint": "gained = 按带出总额排行（本局带出多少，含成本）；profit = 按净收益排行（扣掉装备成本后的实际赚头）。影响每日汇总和 /df 今日排行。"
       }
     }
   },
