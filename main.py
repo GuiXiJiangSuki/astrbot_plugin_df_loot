@@ -26,6 +26,7 @@ try:
         LootBattle,
         LootTracker,
         OverlayClient,
+        battle_age_seconds,
         parse_battle,
     )
     from .df_loot_card import (
@@ -47,6 +48,7 @@ except ImportError:
         LootBattle,
         LootTracker,
         OverlayClient,
+        battle_age_seconds,
         parse_battle,
     )
     from df_loot_card import (
@@ -86,9 +88,44 @@ class DfLootPlugin(Star):
     # ─────────────── 配置读取 ───────────────
 
     def _cfg(self, key: str, default: Any = None) -> Any:
+        """读取配置项，支持三种存储结构。
+
+        背景
+        ────
+        为了让 AstrBot 设置页显示成分组大标题（像 livingmemory 那样），
+        _conf_schema.json 改用了 object 嵌套结构：
+
+            { "basic": { "items": { "df_overlay_url": {...} } } }
+
+        AstrBot 实际保存时会把 items 的内容**直接平铺到分组对象里**（不再
+        保留 items 层），存成：
+
+            { "basic": { "df_overlay_url": "..." } }
+
+        所以这里三种都要认：
+          1) 顶层扁平（老配置）
+          2) 分组下直接平铺（AstrBot 迁移后的实际格式）
+          3) 分组下的 items 里（schema 原始写法）
+        """
         try:
-            val = self.astrbot_config.get(key, default)
-            return default if val is None else val
+            cfg = self.astrbot_config
+            # 1) 扁平
+            if key in cfg:
+                val = cfg.get(key)
+                return default if val is None else val
+            # 2) 分组的 items 里
+            for v in cfg.values():
+                if isinstance(v, dict):
+                    items = v.get("items")
+                    if isinstance(items, dict) and key in items:
+                        found = items[key]
+                        return default if found is None else found
+            # 3) 分组下直接平铺
+            for v in cfg.values():
+                if isinstance(v, dict) and key in v:
+                    found = v[key]
+                    return default if found is None else found
+            return default
         except Exception:  # noqa: BLE001
             return default
 
@@ -285,13 +322,13 @@ class DfLootPlugin(Star):
             if battle is None:
                 return web.json_response({"ok": False, "error": "invalid payload"}, status=400)
 
-            if not self._tracker.is_new(battle.room_id):
+            if not self._tracker.is_new(battle.room_id, battle):
                 logger.info("[df_loot] 上报：对局 %s 已播报过，跳过", battle.room_id)
                 return web.json_response(
                     {"ok": True, "accepted": True, "broadcast": False}
                 )
 
-            self._tracker.mark(battle.room_id)
+            self._tracker.mark(battle.room_id, battle)
             # 测试判定（任一命中即视为测试，只发测试群，绝不打扰正式播报群）：
             #   1. 软件里点「测试上报」→ 带 isTest=true
             #   2. roomId 以 test_ / test- 开头（软件测试上报的固定格式）
@@ -675,15 +712,18 @@ class DfLootPlugin(Star):
             return
 
         battle = parse_battle(state)
-        if not battle or not battle.room_id:
+        if not battle:
+            return
+        # roomId 缺失时不再直接丢弃：用内容指纹兜底去重后仍可播报
+        if not battle.room_id and not battle.has_loot:
             return
 
-        # 去重：这一局已经处理过
-        if not self._tracker.is_new(battle.room_id):
+        # 去重：这一局已经处理过（roomId + 内容指纹双重判断）
+        if not self._tracker.is_new(battle.room_id, battle):
             return
 
         # 标记为已见（无论是否播报，避免重复判定）
-        self._tracker.mark(battle.room_id)
+        self._tracker.mark(battle.room_id, battle)
 
         # 判定是否值得播报
         if not self._should_broadcast(battle):
@@ -700,6 +740,23 @@ class DfLootPlugin(Star):
         enable_red = bool(self._cfg("df_enable_red", True))
         enable_key = bool(self._cfg("df_enable_keycard", True))
         only_escape = bool(self._cfg("df_only_escape", False))
+
+        # ── 过期对局过滤 ──
+        # 场景：软件重启后从历史里翻出旧对局、或上报延迟很久才到，
+        # 播报出来是「几小时前的一局」，对群里毫无意义。
+        # 默认 15 分钟；配 0 表示不过滤。
+        try:
+            max_age_min = int(self._cfg("df_max_age_min", 15))
+        except (TypeError, ValueError):
+            max_age_min = 15
+        if max_age_min > 0:
+            age = battle_age_seconds(battle)
+            if age is not None and age > max_age_min * 60:
+                logger.info(
+                    "[df_loot] 对局 %s 已过期（%.0f 分钟前，阈值 %d 分钟），跳过播报",
+                    battle.room_id, age / 60, max_age_min,
+                )
+                return False
 
         try:
             min_value = int(self._cfg("df_min_value", 0)) * 10_000
@@ -749,7 +806,7 @@ class DfLootPlugin(Star):
             # 只下载红/房卡的图，控制请求数
             wanted = [x for x in battle.items if x.is_red or x.is_keycard]
             for it in wanted[:10]:
-                data = await self._client.fetch_item_pic(it.id)
+                data = await self._client.fetch_item_pic(it.id, getattr(it, "pic", ""))
                 if data:
                     item_pics[it.id] = data
 
@@ -766,6 +823,27 @@ class DfLootPlugin(Star):
         want_image = render_mode in ("card", "all")
         want_text = render_mode in ("text", "all")
 
+        # 地图底图：用官方地图工具的同款缩略图当头部背景
+        map_bg_img = None
+        if want_image:
+            try:
+                import df_loot_mapbg as _mapbg
+            except ImportError:
+                from . import df_loot_mapbg as _mapbg
+            try:
+                thumb_path = _mapbg.thumb_for(battle.map_id)
+                if not thumb_path:
+                    # 首次遇到这张图：抓一次并缓存（之后直接命中，不联网）
+                    thumb_path = await _mapbg.build_map_thumb(battle.map_id)
+                if thumb_path:
+                    from PIL import Image as _Image
+
+                    map_bg_img = _Image.open(thumb_path)
+                    map_bg_img.load()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[df_loot] 地图底图准备失败: %s", exc)
+                map_bg_img = None
+
         if want_image:
             try:
                 png = render_card(
@@ -774,13 +852,18 @@ class DfLootPlugin(Star):
                     item_pics=item_pics,
                     show_avatar=bool(self._cfg("df_show_avatar", False)),
                     show_items=bool(self._cfg("df_show_items", True)),
+                    map_bg=map_bg_img,
+                    item_layout=str(self._cfg("df_item_layout", "grid")).strip().lower(),
                 )
                 image_comp = Image.fromBase64(base64.b64encode(png).decode("ascii"))
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[df_loot] 卡片渲染失败，退回文字: %s", exc)
 
-        # 文字摘要（card 模式下由 df_attach_text 控制；all 模式强制带文字）
-        if want_image and render_mode != "all" and self._cfg("df_attach_text", True):
+        # 文字摘要
+        # 修复：此前 card 模式还会附加文字摘要（df_attach_text 默认 True），
+        # 与「card = 只发图片」的说明矛盾，用户看到就是文字+图片。
+        # 现在严格按模式来：card 只发图片，text 只发文字，all 两个都发。
+        if render_mode == "all":
             brief = build_brief_text(battle)
             if brief:
                 text_comp = Plain(brief)
@@ -1713,6 +1796,25 @@ class DfLootPlugin(Star):
                 data = await self._client.fetch_item_pic(itid)
                 if data:
                     item_pics[itid] = data
+
+            # 地图底图（与正式播报一致）
+            map_bg_img = None
+            try:
+                try:
+                    import df_loot_mapbg as _mapbg
+                except ImportError:
+                    from . import df_loot_mapbg as _mapbg
+                tp = _mapbg.thumb_for(battle.map_id) or await _mapbg.build_map_thumb(
+                    battle.map_id
+                )
+                if tp:
+                    from PIL import Image as _Image
+
+                    map_bg_img = _Image.open(tp)
+                    map_bg_img.load()
+            except Exception:  # noqa: BLE001
+                map_bg_img = None
+
             try:
                 png = render_card(
                     battle,
@@ -1720,11 +1822,20 @@ class DfLootPlugin(Star):
                     item_pics=item_pics,
                     show_avatar=False,
                     show_items=True,
+                    map_bg=map_bg_img,
+                    item_layout=str(self._cfg("df_item_layout", "grid")).strip().lower(),
                 )
-                # 和正式播报保持一致：先文字，后图片
-                brief = build_brief_text(battle)
-                if brief:
-                    yield event.plain_result(brief)
+                # 严格按 render_mode：card 只发图，text 只发文字，all 都发
+                mode = str(self._cfg("df_render_mode", "card")).strip().lower()
+                if mode not in ("card", "text", "all"):
+                    mode = "card"
+                if mode in ("all",):
+                    brief = build_brief_text(battle)
+                    if brief:
+                        yield event.plain_result(brief)
+                elif mode == "text":
+                    yield event.plain_result(build_text_message(battle))
+                    return
                 yield event.chain_result(
                     [Image.fromBase64(base64.b64encode(png).decode("ascii"))]
                 )
@@ -1735,10 +1846,42 @@ class DfLootPlugin(Star):
 
         yield event.plain_result(f"未知子命令：{sub}\n发送 /df 帮助 查看用法")
 
+    def _cfg_set(self, key: str, value: Any) -> bool:
+        """写回配置项，自动适配扁平 / 分组平铺 / 分组 items 三种结构。
+
+        写回时保持原结构不变（AstrBot 迁移后是「分组平铺」，就写回那一层），
+        避免把配置文件搞成两种格式混用。
+        """
+        try:
+            cfg = self.astrbot_config
+            # 1) 扁平
+            if key in cfg:
+                cfg[key] = value
+                return True
+            # 2) 分组 items 里
+            for v in cfg.values():
+                if isinstance(v, dict):
+                    items = v.get("items")
+                    if isinstance(items, dict) and key in items:
+                        items[key] = value
+                        return True
+            # 3) 分组下平铺
+            for v in cfg.values():
+                if isinstance(v, dict) and key in v:
+                    v[key] = value
+                    return True
+            # 都找不到：退回扁平写入（AstrBot 会按 schema 归位）
+            cfg[key] = value
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[df_loot] 写入配置失败 %s: %s", key, exc)
+            return False
+
     def _save_report_test_groups(self, groups: list) -> None:
         """写回测试推送群配置。"""
         try:
-            self.astrbot_config["df_report_test_groups"] = groups
+            if not self._cfg_set("df_report_test_groups", groups):
+                return
             save = getattr(self.astrbot_config, "save_config", None)
             if callable(save):
                 save()
@@ -1748,9 +1891,10 @@ class DfLootPlugin(Star):
             logger.warning("[df_loot] 保存测试群列表失败: %s", exc)
 
     def _save_groups(self, groups: list[int]) -> None:
-        """写回配置。"""
+        """写回播报群配置。"""
         try:
-            self.astrbot_config["df_broadcast_groups"] = groups
+            if not self._cfg_set("df_broadcast_groups", groups):
+                return
             save = getattr(self.astrbot_config, "save_config", None)
             if callable(save):
                 save()
