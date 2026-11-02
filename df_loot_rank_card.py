@@ -160,8 +160,13 @@ def render_rank_daily(
     logo: bytes | None = None,
     max_players: int = 5,
     per_row: int = 3,
+    sort_by: str = "gained",
 ) -> bytes:
-    """渲染排行榜日报图。"""
+    """渲染排行榜日报图。
+
+    sort_by: 'gained' = 按带出排行；'profit' = 按净收益排行。
+             只影响标题文案（排序本身在调用方完成）。
+    """
     players = players[:max_players]
     pics = item_pics or {}
     avs = avatars or {}
@@ -224,7 +229,8 @@ def render_rank_daily(
         except Exception:  # noqa: BLE001
             title_x = PAD
 
-    d.text((S(title_x), S(title_y)), "今日出货排行", font=f_title, fill=GOLD2)
+    by_label = "净收益" if str(sort_by).lower() == "profit" else "带出"
+    d.text((S(title_x), S(title_y)), f"今日出货排行 · 按{by_label}", font=f_title, fill=GOLD2)
     d.text((S(title_x), S(title_y + title_h + text_gap)),
            f"{date} · 全服玩家出货榜", font=f_sub, fill=SUB)
 
@@ -277,19 +283,31 @@ def render_rank_daily(
             meta += f" · 卡 {key_n}"
         d.text((S(nx), S(y + 52)), meta, font=_font(S(15), False), fill=SUB)
 
-        # 右侧：带出价值（大字）
-        gs = _fmt_amount(gained)
-        gw = d.textlength(gs, font=_font(S(27)))
-        d.text((S(W - PAD - 18) - gw, S(y + 16)), gs, font=_font(S(27)), fill=GOLD)
-        lw = d.textlength("带出", font=_font(S(12), False))
-        d.text((S(W - PAD - 18) - lw, S(y + 48)), "带出", font=_font(S(12), False), fill=DIM)
+        # 右侧：主指标（大字）跟着排序依据走
+        #   gained 模式 → 大字带出、绿字净收益
+        #   profit 模式 → 大字净收益、绿字带出
+        if str(sort_by).lower() == "profit":
+            main_val, main_lab = (profit or 0), "净收益"
+            sub_val, sub_lab = (gained or 0), "带出"
+            main_col = GREEN
+        else:
+            main_val, main_lab = (gained or 0), "带出"
+            sub_val, sub_lab = (profit or 0), "净收益"
+            main_col = GOLD
 
-        # 右侧：净收益（绿色小字，在带出下方）
-        if profit:
-            ps = "净收益 " + _fmt_amount(profit)
+        gs = _fmt_amount(main_val)
+        gw = d.textlength(gs, font=_font(S(27)))
+        d.text((S(W - PAD - 18) - gw, S(y + 16)), gs, font=_font(S(27)), fill=main_col)
+        lw = d.textlength(main_lab, font=_font(S(12), False))
+        d.text((S(W - PAD - 18) - lw, S(y + 48)), main_lab, font=_font(S(12), False), fill=DIM)
+
+        # 右侧：副指标（绿色小字，在主指标下方）
+        if sub_val:
+            ps = sub_lab + " " + _fmt_amount(sub_val)
             pw = d.textlength(ps, font=_font(S(13)))
+            sub_col = GOLD if str(sort_by).lower() == "profit" else GREEN
             d.text((S(W - PAD - 18) - pw, S(y + 66)), ps,
-                   font=_font(S(13)), fill=GREEN)
+                   font=_font(S(13)), fill=sub_col)
 
         # ── 物品区 ──
         iy = y + ROW_HEAD
