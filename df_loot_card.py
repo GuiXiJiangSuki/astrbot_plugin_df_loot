@@ -49,6 +49,161 @@ FONT_CANDIDATES = [
 _font_cache: dict[tuple[int, bool], Any] = {}
 
 
+def _find_core_box(src: Any, grid: int = 24) -> tuple[float, float]:
+    """找出地图「核心区」的相对位置（0~1），供外部调试查看。
+
+    返回核心窗口的中心点归一化坐标；窗口宽度按图宽 1/4 估。
+    """
+    try:
+        sw, sh = src.size
+        if sw <= 0 or sh <= 0:
+            return (0.5, 0.5)
+        # 用 1/4 尺寸的窗口滑一遍，取窗口中心
+        win_w = max(1, sw // 4)
+        win_h = max(1, sh // 4)
+        ox = _best_window_offset(_density_profile(src, "x"), sw, win_w)
+        oy = _best_window_offset(_density_profile(src, "y"), sh, win_h)
+        return ((ox + win_w / 2) / sw, (oy + win_h / 2) / sh)
+    except Exception:  # noqa: BLE001
+        return (0.5, 0.5)
+
+
+def _density_profile(src: Any, axis: str, bins: int = 64) -> list[float]:
+    """把地图按轴切成一维密度曲线（边缘强度沿该轴累加）。
+
+    axis='y' → 第 i 个值是第 i 条水平带的细节量（用于上下裁时选窗口）
+    axis='x' → 同上，按垂直带（用于左右裁时选窗口）
+
+    为什么要一维曲线：直接用「全图重心」会被整片地形拉平（实测各图重心
+    都接近 0.50），等于没偏。改成窗口滑动找最密的一段才有意义。
+    """
+    try:
+        from PIL import Image, ImageFilter
+
+        SZ = 256
+        small = src.convert("L").resize((SZ, SZ), Image.BILINEAR)
+        edges = small.filter(ImageFilter.FIND_EDGES)
+        px = edges.load()
+
+        out: list[float] = []
+        step = SZ / bins
+        for i in range(bins):
+            a0 = int(i * step)
+            a1 = max(a0 + 1, int((i + 1) * step))
+            s = 0.0
+            if axis == "y":
+                for y in range(a0, min(a1, SZ)):
+                    for x in range(0, SZ, 2):     # 横抽样，够用且快
+                        s += px[x, y]
+            else:
+                for x in range(a0, min(a1, SZ)):
+                    for y in range(0, SZ, 2):
+                        s += px[x, y]
+            out.append(s)
+        return out
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _best_window_offset(profile: list[float], total_size: int, window: int) -> int:
+    """在一维密度曲线上滑动窗口，返回细节总量最大的起始偏移。
+
+    找不到合适窗口（图不需要裁 / 无数据）时返回居中偏移。
+    """
+    need = total_size - window
+    if need <= 0 or not profile:
+        return max(0, need // 2)
+
+    n = len(profile)
+    bin_px = total_size / n
+    win_bins = max(1, int(round(window / bin_px)))
+
+    pref = [0.0]
+    for v in profile:
+        pref.append(pref[-1] + v)
+
+    best_start = 0
+    best_sum = -1.0
+    last = max(0, n - win_bins)
+    for b in range(0, last + 1):
+        s = pref[min(n, b + win_bins)] - pref[b]
+        if s > best_sum:
+            best_sum = s
+            best_start = b
+
+    off = int(round(best_start * bin_px))
+    return max(0, min(need, off))
+
+
+def _draw_map_bg(
+    bg: Any, map_img: Any, w: int, h: int, scale_fn: Any
+) -> None:
+    """把地图缩略图铺到卡片头部当背景。
+
+    处理要点
+    ────────
+    1. 等比裁切铺满（cover），不拉伸变形；
+    2. 裁切窗口偏向「核心区」（建筑/路网密集处），而不是死板取正中；
+    3. 整体压暗，保证白字可读；
+    4. 右侧渐隐到卡片底色，让「带出 585.9万」区域干净；
+    5. 底部轻微渐隐，和下方的物品区自然衔接。
+    """
+    from PIL import Image
+
+    if map_img is None or w <= 0 or h <= 0:
+        return
+
+    src = map_img.convert("RGB")
+    sw, sh = src.size
+    if sw <= 0 or sh <= 0:
+        return
+
+    # cover 裁切：保持比例填满目标区域
+    target_ratio = w / h
+    src_ratio = sw / sh
+    if src_ratio > target_ratio:
+        # 源更宽 → 按高度缩放，左右裁
+        new_h = h
+        new_w = int(round(sw * h / sh)) if sh else w
+        resized = src.resize((new_w, new_h), Image.LANCZOS)
+        # 滑动窗口找细节最密集的一段（而不是取正中）
+        prof = _density_profile(src, "x")
+        left = _best_window_offset(prof, new_w, w)
+        crop = resized.crop((left, 0, left + w, h))
+    else:
+        # 源更高 → 按宽度缩放，上下裁
+        new_w = w
+        new_h = int(round(sh * w / sw)) if sw else h
+        resized = src.resize((new_w, new_h), Image.LANCZOS)
+        prof = _density_profile(src, "y")
+        top = _best_window_offset(prof, new_h, h)
+        crop = resized.crop((0, top, w, top + h))
+
+    # 压暗（乘 0.62 —— 太暗就看不出是哪张图了，0.62 仍能保证白字可读）
+    dark = crop.point(lambda v: int(v * 0.62))
+    bg.paste(dark, (0, 0))
+
+    # 右侧 + 底部渐隐到卡片底色，让文字区域干净
+    from PIL import ImageDraw as _ID
+
+    overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    od = _ID.Draw(overlay, "RGBA")
+    # 右侧 74% 才开始渐隐：尽量多露地图，只保住「带出 xxx万」那块
+    fade_start = int(w * 0.74)
+    for x in range(fade_start, w):
+        t = (x - fade_start) / max(1, w - fade_start)
+        a = int(230 * (t ** 1.3))
+        od.line([(x, 0), (x, h)], fill=BG_BOT + (a,))
+    # 底部 26% 渐隐（和物品区自然衔接）
+    fade_h = int(h * 0.26)
+    for y in range(h - fade_h, h):
+        t = (y - (h - fade_h)) / max(1, fade_h)
+        a = int(185 * (t ** 1.6))
+        od.line([(0, y), (w, y)], fill=BG_BOT + (a,))
+
+    bg.paste(Image.alpha_composite(bg.convert("RGBA"), overlay).convert("RGB"), (0, 0))
+
+
 def _font(size: int, bold: bool = True) -> Any:
     key = (size, bold)
     if key in _font_cache:
@@ -139,40 +294,65 @@ def render_card(
     show_items: bool = True,
     max_items: int = 6,
     scale: int = 2,
+    map_bg: "Image.Image | None" = None,
+    item_layout: str = "grid",
 ) -> bytes:
     """渲染出货卡片，返回 PNG 字节。
 
     scale=2 表示 2 倍超采样，输出更清晰。
     show_avatar 默认关闭（不显示账号头像）。
+    map_bg 为对应对局的官方地图缩略图（PIL Image），有则铺在头部当背景。
+    item_layout:
+        'grid' = 网格（一行 3 个，紧凑，物品多时友好）
+        'list' = 列表（每行一个，图标更大、名称完整）
     """
     item_pics = item_pics or {}
+    layout = "list" if str(item_layout).lower() == "list" else "grid"
 
     # ── 布局参数（逻辑像素）──
     PAD = 18
     HEAD_H = 96          # 头部高度（不含左侧圆形区）
-    ICON = 52
-    ITEM_H = 66
-    W = 520
 
     reds = battle.reds
     keys = battle.keycards
-    # 只展示红和房卡
-    show_list = reds + keys
-    show_list = sorted(show_list, key=lambda x: (0 if x.is_red else 1, -x.total))
+    show_reds = sorted(reds, key=lambda x: -x.total) if show_items else []
+    show_keys = sorted(keys, key=lambda x: -x.total) if show_items else []
 
-    # 角标高度（没有角标时为 0）
-    BADGE_H = 32 if (reds or keys) else 0
-    body_rows = show_list[:max_items] if show_items else []
-    body_h = len(body_rows) * (ITEM_H + 8) + (10 if body_rows else 0)
-    H = HEAD_H + BADGE_H + body_h + 26
+    if layout == "list":
+        # 列表：每行一个物品，卡片窄一些、图标大一些
+        W = 560
+        COLS = 1
+        CELL_GAP = 8
+        CELL_H = 66
+        ICON = 52
+    else:
+        # 网格：一行 3 个（和官方战绩页一致）
+        W = 640
+        COLS = 3
+        CELL_GAP = 9
+        CELL_H = 88
+        ICON = 44
+
+    # 分区块高度：红一组 + 房卡一组
+    def _group_h(n: int) -> int:
+        if n <= 0:
+            return 0
+        rows = (n + COLS - 1) // COLS
+        return 22 + rows * (CELL_H + CELL_GAP)   # 22 = 小标题行
+
+    body_h = _group_h(len(show_reds)) + _group_h(len(show_keys))
+    H = HEAD_H + 10 + body_h + 26
 
     S = scale
     Wp, Hp = W * S, H * S
 
+    def S_(v: float) -> int:
+        return int(round(v * S))
+
     # ── 背景 ──
     bg = Image.new("RGB", (Wp, Hp), BG_BOT)
     d = ImageDraw.Draw(bg, "RGBA")
-    # 竖向渐变
+    # 竖向渐变（打底）
     for y in range(Hp):
         t = y / max(1, Hp - 1)
         c = (
@@ -182,19 +362,27 @@ def render_card(
         )
         d.line([(0, y), (Wp, y)], fill=c)
 
-    def S_(v: float) -> int:
-        return int(round(v * S))
+    # ── 地图底图（头部区域）──
+    # 用对应对局的官方地图缩略图铺在头部，压暗 + 右侧淡出，
+    # 让文字可读的同时一眼看出是哪张图。
+    head_h_px = S_(HEAD_H)
+    if map_bg is not None:
+        try:
+            _draw_map_bg(bg, map_bg, Wp, head_h_px, S_)
+        except Exception:  # noqa: BLE001
+            pass  # 底图失败不影响卡片
 
     # ── 边框 ──
     d.rounded_rectangle(
         [1, 1, Wp - 2, Hp - 2], radius=S_(16), outline=GOLD + (140,), width=S_(2)
     )
 
-    # ── 头部背景（淡金渐变条）──
-    head_h = S_(HEAD_H)
+    # ── 头部金色渐变条（叠在地图上；有地图时减淡，否则会盖掉地图）──
+    head_h = head_h_px
+    gold_boost = 1.0 if map_bg is None else 0.42
     for x in range(Wp):
         t = x / max(1, Wp - 1)
-        a = int(46 * (1 - t) + 10 * t)
+        a = int((46 * (1 - t) + 10 * t) * gold_boost)
         d.line([(x, 0), (x, head_h)], fill=GOLD + (a,))
     d.line([(0, head_h), (Wp, head_h)], fill=GOLD + (55,), width=S_(1))
 
@@ -202,15 +390,24 @@ def render_card(
     tx = S_(PAD + 4)
     f_name = _font(S_(24))
     f_meta = _font(S_(16))
-    d.text((tx, S_(PAD + 6)), battle.player or "未知", font=f_name, fill=TEXT)
+
+    # 有地图底图时给文字加阴影：地图亮部会吃掉白色文字
+    shadow_off = S_(2) if map_bg is not None else 0
+
+    def _txt(xy, s, font, fill):
+        if shadow_off:
+            d.text((xy[0] + shadow_off, xy[1] + shadow_off), s, font=font, fill=(0, 0, 0, 210))
+        d.text(xy, s, font=font, fill=fill)
+
+    _txt((tx, S_(PAD + 6)), battle.player or "未知", f_name, TEXT)
 
     meta_y = S_(PAD + 42)
     meta_x = tx
     if battle.escape:
-        d.text((meta_x, meta_y), "撤离成功", font=f_meta, fill=GREEN)
+        _txt((meta_x, meta_y), "撤离成功", f_meta, GREEN)
         meta_x += d.textlength("撤离成功", font=f_meta) + S_(12)
     else:
-        d.text((meta_x, meta_y), "撤离失败", font=f_meta, fill=RED)
+        _txt((meta_x, meta_y), "撤离失败", f_meta, RED)
         meta_x += d.textlength("撤离失败", font=f_meta) + S_(12)
 
     # 地图名
@@ -245,85 +442,177 @@ def render_card(
         "哈夫币", font=f_gl, fill=GOLD_DIM,
     )
 
-    # ── 角标：红/房卡 ──
-    by = S_(HEAD_H + 6)
-    bx = S_(PAD)
-    if reds:
-        tag = f"红 {len(reds)}"
-        tw = d.textlength(tag, font=_font(S_(14))) + S_(22)
-        _rounded(d, [bx, by, bx + tw, by + S_(25)], S_(7), RED + (42,))
-        d.text((bx + S_(11), by + S_(4)), tag, font=_font(S_(14)), fill=RED)
-        bx += tw + S_(10)
-    if keys:
-        tag = f"房卡 {len(keys)}"
-        tw = d.textlength(tag, font=_font(S_(14))) + S_(22)
-        _rounded(d, [bx, by, bx + tw, by + S_(25)], S_(7), BLUE + (42,))
-        d.text((bx + S_(11), by + S_(4)), tag, font=_font(S_(14)), fill=BLUE)
-        bx += tw + S_(10)
+    # ── 物品网格（图二风格：多列小图标 + 汇总标题）──
+    # 分两组展示：红一组、房卡一组，各自带「N 种 · M 件 · X万」汇总行
+    grid_y = S_(HEAD_H + 8)
+    left_x = S_(PAD)
+    avail_w = Wp - S_(PAD) * 2
+    cell_w = (avail_w - S_(CELL_GAP) * (COLS - 1)) // COLS if COLS > 1 else avail_w
 
-    # ── 物品列表（只显示红 + 房卡）──
-    if body_rows:
-        ry = S_(HEAD_H + BADGE_H + 6)
-        for it in body_rows:
-            # 行底
-            row_bg = RED + (26,) if it.is_red else BLUE + (24,)
-            row_bd = RED + (70,) if it.is_red else BLUE + (60,)
-            _rounded(d, [S_(PAD), ry, Wp - S_(PAD), ry + S_(ITEM_H)], S_(10), row_bg)
-            d.rounded_rectangle(
-                [S_(PAD), ry, Wp - S_(PAD), ry + S_(ITEM_H)],
-                radius=S_(10), outline=row_bd, width=S_(1),
+    def _draw_group(items: list, is_red_group: bool) -> int:
+        """画一组物品，返回占用后新的 y 坐标（设备像素）。"""
+        nonlocal grid_y
+        if not items:
+            return grid_y
+        accent = RED if is_red_group else BLUE
+        label = "红" if is_red_group else "房卡"
+        f_hd = _font(S_(12))
+        f_hd_b = _font(S_(13))
+
+        # 汇总行：「红  10 种 · 15 件 · 942.4万」
+        kinds = len(items)
+        pieces = sum(max(1, it.num) for it in items)
+        total_v = sum(it.total for it in items)
+
+        tag = label
+        tw = d.textlength(tag, font=f_hd_b) + S_(16)
+        _rounded(d, [left_x, grid_y, left_x + tw, grid_y + S_(19)], S_(5), accent + (52,))
+        d.text((left_x + S_(8), grid_y + S_(2)), tag, font=f_hd_b, fill=accent)
+
+        # 汇总文字
+        summ = f"{kinds} 种 · {pieces} 件"
+        if total_v > 0:
+            summ += f" · {_fmt_price(total_v)}"
+        d.text((left_x + tw + S_(10), grid_y + S_(3)), summ, font=f_hd, fill=SUB)
+
+        grid_y += S_(22)
+
+        # ── 列表模式：每行一个，图标左、文字右 ──
+        if layout == "list":
+            for it in items:
+                row_top = grid_y
+                _rounded(
+                    d,
+                    [left_x, row_top, left_x + avail_w, row_top + S_(CELL_H)],
+                    S_(9), accent + (22,),
+                )
+                d.rounded_rectangle(
+                    [left_x, row_top, left_x + avail_w, row_top + S_(CELL_H)],
+                    radius=S_(9), outline=accent + (58,), width=S_(1),
+                )
+
+                # 图标（左）
+                pic = _item_image(item_pics.get(it.id), S_(ICON))
+                ix = left_x + S_(8)
+                iy = row_top + (S_(CELL_H) - S_(ICON)) // 2
+                if pic is not None:
+                    px = ix + (S_(ICON) - pic.width) // 2
+                    py = iy + (S_(ICON) - pic.height) // 2
+                    bg.paste(pic, (px, py), pic)
+                else:
+                    _rounded(
+                        d,
+                        [ix, iy, ix + S_(ICON), iy + S_(ICON)],
+                        S_(6), (255, 255, 255, 18),
+                    )
+
+                # 名称 + 品质标签（右上）
+                nx = ix + S_(ICON) + S_(11)
+                ny = row_top + S_(11)
+                f_nm = _font(S_(16))
+                nm = it.name or "未知"
+                max_w = left_x + avail_w - nx - S_(86)
+                while nm and d.textlength(nm, font=f_nm) > max_w:
+                    nm = nm[:-1]
+                if nm != (it.name or "未知") and nm:
+                    nm = nm[:-1] + "…"
+                d.text((nx, ny), nm, font=f_nm, fill=TEXT)
+                nw = d.textlength(nm, font=f_nm)
+
+                # 品质标签跟在名称后
+                if it.is_red:
+                    _rounded(d, [nx + nw + S_(7), ny + S_(1), nx + nw + S_(38), ny + S_(22)], S_(4), RED + (58,))
+                    d.text((nx + nw + S_(11), ny + S_(4)), "红", font=_font(S_(12)), fill=RED)
+                elif it.is_keycard:
+                    _rounded(d, [nx + nw + S_(7), ny + S_(1), nx + nw + S_(52), ny + S_(22)], S_(4), BLUE + (52,))
+                    d.text((nx + nw + S_(11), ny + S_(4)), "房卡", font=_font(S_(12)), fill=BLUE)
+
+                # 数量 + 总价（第二行）
+                f_sub = _font(S_(13))
+                parts = []
+                if it.num > 1:
+                    parts.append(f"×{it.num}")
+                if it.total > 0:
+                    parts.append(f"{_fmt_price(it.total)} 哈夫币")
+                if parts:
+                    d.text((nx, row_top + S_(37)), "  ".join(parts), font=f_sub, fill=SUB)
+
+                grid_y += S_(CELL_H) + S_(CELL_GAP)
+
+            return grid_y
+
+        # ── 网格模式：一行 COLS 个 ──
+        for idx, it in enumerate(items):
+            col = idx % COLS
+            row = idx // COLS
+            cx = left_x + col * (cell_w + S_(CELL_GAP))
+            cy = grid_y + row * (S_(CELL_H) + S_(CELL_GAP))
+
+            # 单元底
+            _rounded(
+                d,
+                [cx, cy, cx + cell_w, cy + S_(CELL_H)],
+                S_(8), accent + (22,),
             )
 
-            # 物品图
+            # 图标（居中，垂直位置留出上下文字空间）
             pic = _item_image(item_pics.get(it.id), S_(ICON))
-            ix = S_(PAD + 9)
-            iy = ry + (S_(ITEM_H) - S_(ICON)) // 2
+            icon_cx = cx + (cell_w - S_(ICON)) // 2
+            icon_cy = cy + S_(7)
             if pic is not None:
-                bg.paste(pic, (ix, iy), pic)
+                # 居中贴图
+                px = icon_cx + (S_(ICON) - pic.width) // 2
+                py = icon_cy + (S_(ICON) - pic.height) // 2
+                bg.paste(pic, (px, py), pic)
             else:
                 _rounded(
                     d,
-                    [ix, iy, ix + S_(ICON), iy + S_(ICON)],
-                    S_(7), (255, 255, 255, 18),
-                )
-                # 占位文字
-                f_ph = _font(S_(11))
-                t = "图"
-                tb = d.textbbox((0, 0), t, font=f_ph)
-                d.text(
-                    (ix + (S_(ICON) - (tb[2] - tb[0])) / 2 - tb[0],
-                     iy + (S_(ICON) - (tb[3] - tb[1])) / 2 - tb[1]),
-                    t, font=f_ph, fill=SUB_DIM,
+                    [icon_cx, icon_cy, icon_cx + S_(ICON), icon_cy + S_(ICON)],
+                    S_(5), (255, 255, 255, 16),
                 )
 
-            # 名称 + 标签
-            nx = ix + S_(ICON) + S_(10)
-            ny = ry + S_(11)
-            f_nm = _font(S_(16))
-            nm = it.name
-            d.text((nx, ny), nm, font=f_nm, fill=TEXT)
-            nw = d.textlength(nm, font=f_nm)
-
-            # 品质标签
-            if it.is_red:
-                _rounded(d, [nx + nw + S_(7), ny, nx + nw + S_(38), ny + S_(21)], S_(4), RED + (58,))
-                d.text((nx + nw + S_(11), ny + S_(3)), "红", font=_font(S_(12)), fill=RED)
-            elif it.is_keycard:
-                _rounded(d, [nx + nw + S_(7), ny, nx + nw + S_(52), ny + S_(21)], S_(4), BLUE + (52,))
-                d.text((nx + nw + S_(11), ny + S_(3)), "房卡", font=_font(S_(12)), fill=BLUE)
-
-            # 数量 + 价格
-            f_sub = _font(S_(13))
-            sy = ny + S_(26)
-            parts = []
+            # 数量角标（右上，>1 才显示）
             if it.num > 1:
-                parts.append(f"×{it.num}")
-            if it.total > 0:
-                parts.append(f"{_fmt_price(it.total)} 哈夫币")
-            if parts:
-                d.text((nx, sy), "  ".join(parts), font=f_sub, fill=SUB)
+                f_q = _font(S_(10))
+                q = f"×{it.num}"
+                qw = d.textlength(q, font=f_q) + S_(8)
+                qx = cx + cell_w - qw - S_(4)
+                qy = cy + S_(5)
+                _rounded(d, [qx, qy, qx + qw, qy + S_(15)], S_(3), (0, 0, 0, 170))
+                d.text((qx + S_(4), qy + S_(1)), q, font=f_q, fill=GOLD2)
 
-            ry += S_(ITEM_H + 8)
+            # 名称（可能截断）—— 图标下方
+            f_nm = _font(S_(11))
+            nm = it.name or "未知"
+            max_w = cell_w - S_(10)
+            while nm and d.textlength(nm, font=f_nm) > max_w:
+                nm = nm[:-1]
+            if nm != (it.name or "未知") and nm:
+                nm = nm[:-1] + "…"
+            nw = d.textlength(nm, font=f_nm)
+            d.text(
+                (cx + (cell_w - nw) / 2, cy + S_(57)),
+                nm, font=f_nm, fill=TEXT,
+            )
+
+            # 价格 —— 名称下方
+            f_pr = _font(S_(10))
+            pr = _fmt_price(it.total) if it.total > 0 else ""
+            if pr:
+                pw = d.textlength(pr, font=f_pr)
+                d.text(
+                    (cx + (cell_w - pw) / 2, cy + S_(72)),
+                    pr, font=f_pr, fill=accent,
+                )
+
+        grid_y += ((len(items) + COLS - 1) // COLS) * (S_(CELL_H) + S_(CELL_GAP))
+        return grid_y
+
+    grid_y = _draw_group(show_reds, True)
+    if show_reds and show_keys:
+        grid_y += S_(2)
+    grid_y = _draw_group(show_keys, False)
+
 
     # ── 页脚 ──
     f_foot = _font(S_(12))
