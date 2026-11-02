@@ -161,11 +161,13 @@ def render_rank_daily(
     max_players: int = 5,
     per_row: int = 3,
     sort_by: str = "gained",
+    is_yesterday: bool = False,
 ) -> bytes:
     """渲染排行榜日报图。
 
     sort_by: 'gained' = 按带出排行；'profit' = 按净收益排行。
              只影响标题文案（排序本身在调用方完成）。
+    is_yesterday: 标题显示「昨日」还是「今日」。
     """
     players = players[:max_players]
     pics = item_pics or {}
@@ -230,7 +232,8 @@ def render_rank_daily(
             title_x = PAD
 
     by_label = "净收益" if str(sort_by).lower() == "profit" else "带出"
-    d.text((S(title_x), S(title_y)), f"今日出货排行 · 按{by_label}", font=f_title, fill=GOLD2)
+    word = "昨日" if is_yesterday else "今日"
+    d.text((S(title_x), S(title_y)), f"{word}出货排行 · 按{by_label}", font=f_title, fill=GOLD2)
     d.text((S(title_x), S(title_y + title_h + text_gap)),
            f"{date} · 全服玩家出货榜", font=f_sub, fill=SUB)
 
