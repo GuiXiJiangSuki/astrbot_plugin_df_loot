@@ -429,8 +429,14 @@ class DfLootPlugin(Star):
         except Exception as exc:  # noqa: BLE001
             logger.warning("[df_loot] 注册日报任务失败: %s", exc)
 
-    async def _fetch_rank_top(self, limit: int = 5) -> list:
-        """从排行服务拉今日 TOP N。
+    async def _fetch_rank_top(self, limit: int = 5, range_key: str = "today") -> list:
+        """从排行服务拉 TOP N。
+
+        range_key:
+          "today"          → 今天
+          "yesterday"      → 昨天（内部换算成 YYYY-MM-DD）
+          "3d"             → 近三天
+          "YYYY-MM-DD"     → 指定日期
 
         排序依据由配置 df_rank_sort 决定：
           gained（默认）= 按带出总额
@@ -439,13 +445,26 @@ class DfLootPlugin(Star):
         注意：排行服务本身只按「带出」排序，传 sort 参数无效（实测）。
         所以这里一次性拉足够多条（接口最多返回 ~20 条），拿到本地再按
         需要的字段重排 + 截断，保证净收益榜也是全量里选出的 TOP N。
+
+        另外服务端不认 range=yesterday（会被当成 today），
+        必须自己换算成具体的 YYYY-MM-DD 日期。
         """
         if aiohttp is None:
             return []
+
+        # 换算 range
+        rk = str(range_key or "today").strip().lower()
+        if rk == "yesterday":
+            from datetime import date, timedelta
+
+            rk = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+        elif rk in ("", "today"):
+            rk = "today"
+
         url = f"{self.rank_base}/api/rank/range"
-        # 多拉一些，避免「按净收益取 TOP5」时拿到的都是带出榜的前几条
+        # 多拉一些，避免「按净收益取 TOP N」时拿到的都是带出榜的前几条
         fetch_limit = max(50, limit * 4)
-        params = {"range": "today", "limit": str(fetch_limit)}
+        params = {"range": rk, "limit": str(fetch_limit)}
         try:
             timeout = aiohttp.ClientTimeout(total=20)
             async with aiohttp.ClientSession(timeout=timeout) as sess:
@@ -459,7 +478,7 @@ class DfLootPlugin(Star):
             return []
         if not isinstance(j, dict) or not j.get("ok"):
             return []
-        rows = j.get("list") or []
+        rows = [p for p in (j.get("list") or []) if isinstance(p, dict)]
 
         # 按配置重排
         sort_by = str(self._cfg("df_rank_sort", "gained")).strip().lower()
@@ -532,14 +551,16 @@ class DfLootPlugin(Star):
             pass
         return out
 
-    def _build_rank_daily_text(self, players: list, date: str) -> str:
+    def _build_rank_daily_text(self, players: list, date: str, is_yesterday: bool = False) -> str:
         """排行榜汇总的文字版。"""
         sort_by = str(self._cfg("df_rank_sort", "gained")).strip().lower()
         by_label = "净收益" if sort_by == "profit" else "带出"
+        # 标题跟随日期类型（昨日/今日）
+        word = "昨日" if is_yesterday else "今日"
         if not players:
-            return f"【今日出货排行 · 按{by_label} · {date}】\n\n今天还没有玩家上榜。"
-        lines = [f"【今日出货排行 · 按{by_label} · {date}】", ""]
-        for i, p in enumerate(players[:5]):
+            return f"【{word}出货排行 · 按{by_label} · {date}】\n\n{word}还没有玩家上榜。"
+        lines = [f"【{word}出货排行 · 按{by_label} · {date}】", ""]
+        for i, p in enumerate(players):
             rank = p.get("rank") or (i + 1)
             name = p.get("name") or "未知"
             gained = self._fmt_money(p.get("gained") or 0)
@@ -582,13 +603,18 @@ class DfLootPlugin(Star):
         *,
         test_only: bool = False,
         target_groups: list | None = None,
+        range_key: str = "today",
+        top_n: int | None = None,
     ) -> None:
-        """每日排行榜出货汇总。
+        """排行汇总（今日 / 昨日 / 指定日期）。
 
         群选择优先级：
-          1. target_groups  —— 指定群（/df 今天排行 用：在哪个群发就回哪个群）
+          1. target_groups  —— 指定群（/df 今日排行 用：在哪个群发就回哪个群）
           2. test_only      —— 只发测试群
           3. 默认            —— 发所有播报群（cron 定时任务用）
+
+        range_key: "today" | "yesterday" | "YYYY-MM-DD"
+        top_n:     显示前几名；不传则读配置 df_rank_top（默认 5）
         """
         if target_groups:
             groups = list(target_groups)
@@ -602,13 +628,44 @@ class DfLootPlugin(Star):
             logger.info("[df_loot] 排行日报：没有配置%s，跳过", tag)
             return
 
-        players = await self._fetch_rank_top(5)
+        # 显示人数：显式传入 > 配置 > 默认 5
+        if top_n is None:
+            try:
+                top_n = int(self._cfg("df_rank_top", 5))
+            except (TypeError, ValueError):
+                top_n = 5
+        top_n = max(1, min(int(top_n or 5), 20))
+
+        # 榜单对应的日期（提前算，无人上榜时也要用到）
+        from datetime import date, datetime, timedelta
+
+        rk = str(range_key or "today").strip().lower()
+        if rk == "yesterday":
+            date_str = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+        elif rk in ("today", ""):
+            date_str = datetime.now().strftime("%Y-%m-%d")
+        elif "/" in rk:
+            date_str = rk.replace("/", "-")
+        else:
+            date_str = rk
+        is_yesterday = date_str == (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+        word = "昨日" if is_yesterday else "今日"
+
+        players = await self._fetch_rank_top(top_n, range_key)
         if not players:
-            logger.info("[df_loot] 排行日报：今日无人上榜，跳过")
+            logger.info("[df_loot] 排行日报：该时间无人上榜（range=%s）", range_key)
+            # 手动命令要给出明确反馈，不能静默返回让人以为坏了
+            if target_groups:
+                try:
+                    msg = f"【{word}出货排行 · {date_str}】\n\n{word}没有玩家上榜。"
+                    for gid in target_groups:
+                        await self._send_to_group(gid, [Plain(msg)])
+                except Exception:  # noqa: BLE001
+                    pass
             return
 
-        from datetime import datetime
-        date = datetime.now().strftime("%Y-%m-%d")
+        # 是否昨日（影响卡片标题文案）
+        date = date_str
 
         # 下载物品图标 + 玩家头像
         pics = await self._fetch_rank_pics(players)
@@ -618,7 +675,7 @@ class DfLootPlugin(Star):
         if avatars:
             logger.info("[df_loot] 排行日报：头像 %s 个", len(avatars))
 
-        text = self._build_rank_daily_text(players, date)
+        text = self._build_rank_daily_text(players, date, is_yesterday=is_yesterday)
 
         # 按「播报样式」决定发文字还是图片（和出货播报保持一致）
         #   card → 只发图片    text → 只发文字    all → 文字 + 图片
@@ -637,9 +694,10 @@ class DfLootPlugin(Star):
                     item_pics=pics,
                     avatars=avatars,
                     logo=self._load_logo(),
-                    max_players=5,
+                    max_players=top_n,
                     per_row=3,
                     sort_by=str(self._cfg("df_rank_sort", "gained")).strip().lower(),
+                    is_yesterday=is_yesterday,
                 )
                 image_comp = Image.fromBase64(base64.b64encode(png).decode("ascii"))
             except Exception as exc:  # noqa: BLE001
@@ -1629,6 +1687,7 @@ class DfLootPlugin(Star):
                 "/df 取消上报测试 — 取消本群测试推送\n"
                 "/df 今日战绩 <游戏ID> — 查询该玩家今日出货战绩\n"
                 "/df 今日排行 — 生成今日出货排行榜（排序依据见设置）\n"
+                "/df 昨日排行 — 生成昨日出货排行榜\n"
                 "/df 卡战备 <11/18/55/60/78w> — 查询卡战备配装（如 60w）\n"
                 "/df 测试 — 用当前数据渲染一张卡片（需调试群）"
             )
@@ -1737,9 +1796,23 @@ class DfLootPlugin(Star):
                 return
             yield event.plain_result("正在生成今日排行榜…")
             try:
-                await self._daily_report(target_groups=[cur_gid])
+                await self._daily_report(target_groups=[cur_gid], range_key="today")
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[df_loot] 今日排行失败: %s", exc)
+                yield event.plain_result(f"生成失败：{exc}")
+            return
+
+        if sub in ("昨日排行", "昨天排行", "昨日榜", "昨天榜",
+                   "昨日榜单", "昨天榜单", "昨日排行榜"):
+            cur_gid = self._group_key(event)
+            if not cur_gid:
+                yield event.plain_result("无法识别当前群，请在群里使用该命令")
+                return
+            yield event.plain_result("正在生成昨日排行榜…")
+            try:
+                await self._daily_report(target_groups=[cur_gid], range_key="yesterday")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[df_loot] 昨日排行失败: %s", exc)
                 yield event.plain_result(f"生成失败：{exc}")
             return
 
