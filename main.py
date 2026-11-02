@@ -430,11 +430,22 @@ class DfLootPlugin(Star):
             logger.warning("[df_loot] 注册日报任务失败: %s", exc)
 
     async def _fetch_rank_top(self, limit: int = 5) -> list:
-        """从排行服务拉今日 TOP N。"""
+        """从排行服务拉今日 TOP N。
+
+        排序依据由配置 df_rank_sort 决定：
+          gained（默认）= 按带出总额
+          profit        = 按净收益
+
+        注意：排行服务本身只按「带出」排序，传 sort 参数无效（实测）。
+        所以这里一次性拉足够多条（接口最多返回 ~20 条），拿到本地再按
+        需要的字段重排 + 截断，保证净收益榜也是全量里选出的 TOP N。
+        """
         if aiohttp is None:
             return []
         url = f"{self.rank_base}/api/rank/range"
-        params = {"range": "today", "limit": str(limit)}
+        # 多拉一些，避免「按净收益取 TOP5」时拿到的都是带出榜的前几条
+        fetch_limit = max(50, limit * 4)
+        params = {"range": "today", "limit": str(fetch_limit)}
         try:
             timeout = aiohttp.ClientTimeout(total=20)
             async with aiohttp.ClientSession(timeout=timeout) as sess:
@@ -448,7 +459,22 @@ class DfLootPlugin(Star):
             return []
         if not isinstance(j, dict) or not j.get("ok"):
             return []
-        return j.get("list") or []
+        rows = j.get("list") or []
+
+        # 按配置重排
+        sort_by = str(self._cfg("df_rank_sort", "gained")).strip().lower()
+        if sort_by == "profit":
+            rows = sorted(rows, key=lambda p: -(int(p.get("profit") or 0)))
+        else:
+            rows = sorted(rows, key=lambda p: -(int(p.get("gained") or 0)))
+
+        # 重排后重写 rank 字段（卡片按 rank 显示名次）
+        out = []
+        for i, p in enumerate(rows[:limit]):
+            q = dict(p)
+            q["rank"] = i + 1
+            out.append(q)
+        return out
 
     async def _fetch_rank_pics(self, players: list) -> dict:
         """下载排行里红/卡物品图标。"""
@@ -508,9 +534,11 @@ class DfLootPlugin(Star):
 
     def _build_rank_daily_text(self, players: list, date: str) -> str:
         """排行榜汇总的文字版。"""
+        sort_by = str(self._cfg("df_rank_sort", "gained")).strip().lower()
+        by_label = "净收益" if sort_by == "profit" else "带出"
         if not players:
-            return f"【今日出货排行 · {date}】\n\n今天还没有玩家上榜。"
-        lines = [f"【今日出货排行 · {date}】", ""]
+            return f"【今日出货排行 · 按{by_label} · {date}】\n\n今天还没有玩家上榜。"
+        lines = [f"【今日出货排行 · 按{by_label} · {date}】", ""]
         for i, p in enumerate(players[:5]):
             rank = p.get("rank") or (i + 1)
             name = p.get("name") or "未知"
@@ -521,8 +549,13 @@ class DfLootPlugin(Star):
             red_n = p.get("redCount") or 0
             key_n = p.get("keyCount") or 0
             esc_pct = round(escapes / battles * 100) if battles else 0
+            # 主指标跟着排序依据走，放前面
+            if sort_by == "profit":
+                main_txt = f"净收益 {profit} · 带出 {gained}"
+            else:
+                main_txt = f"带出 {gained} · 净收益 {profit}"
             lines.append(
-                f"#{rank} {name} — 带出 {gained} · 净收益 {profit}"
+                f"#{rank} {name} — {main_txt}"
                 f"（{battles} 局 · 撤离率 {esc_pct}%）"
             )
             reds = p.get("redItems") or []
@@ -587,28 +620,46 @@ class DfLootPlugin(Star):
 
         text = self._build_rank_daily_text(players, date)
 
+        # 按「播报样式」决定发文字还是图片（和出货播报保持一致）
+        #   card → 只发图片    text → 只发文字    all → 文字 + 图片
+        mode = str(self._cfg("df_render_mode", "card")).strip().lower()
+        if mode not in ("card", "text", "all"):
+            mode = "card"
+        want_image = mode in ("card", "all")
+        want_text = mode in ("text", "all")
+
         image_comp = None
-        try:
-            png = render_rank_daily(
-                date=date,
-                players=players,
-                item_pics=pics,
-                avatars=avatars,
-                logo=self._load_logo(),
-                max_players=5,
-                per_row=3,
-            )
-            image_comp = Image.fromBase64(base64.b64encode(png).decode("ascii"))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[df_loot] 排行日报卡片渲染失败: %s", exc)
+        if want_image:
+            try:
+                png = render_rank_daily(
+                    date=date,
+                    players=players,
+                    item_pics=pics,
+                    avatars=avatars,
+                    logo=self._load_logo(),
+                    max_players=5,
+                    per_row=3,
+                    sort_by=str(self._cfg("df_rank_sort", "gained")).strip().lower(),
+                )
+                image_comp = Image.fromBase64(base64.b64encode(png).decode("ascii"))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[df_loot] 排行日报卡片渲染失败: %s", exc)
+
+        # 渲染失败兜底：图片没出来就发文字，别让用户什么都收不到
+        if image_comp is None and want_image and not want_text:
+            logger.warning("[df_loot] 排行日报卡片渲染失败，退回文字")
+            want_text = True
 
         sent = 0
         for gid in groups:
             try:
-                ok = await self._send_to_group(gid, [Plain(text)])
-                if ok and image_comp is not None:
-                    await asyncio.sleep(1.2)
-                    await self._send_to_group(gid, [image_comp])
+                ok = True
+                if want_text:
+                    ok = await self._send_to_group(gid, [Plain(text)])
+                if ok and want_image and image_comp is not None:
+                    if want_text:
+                        await asyncio.sleep(1.2)   # 文字和图片分两条发，避免被合并
+                    ok = await self._send_to_group(gid, [image_comp])
                 if ok:
                     sent += 1
                 if len(groups) > 1:
@@ -617,8 +668,8 @@ class DfLootPlugin(Star):
                 logger.warning("[df_loot] 排行日报发送到群 %s 失败: %s", gid, exc)
 
         logger.info(
-            "[df_loot] 排行日报已推送 → %s 个群（TOP %d）",
-            sent, len(players),
+            "[df_loot] 排行日报已推送 → %s 个群（TOP %d，样式 %s）",
+            sent, len(players), mode,
         )
 
     async def terminate(self) -> None:
@@ -1577,7 +1628,7 @@ class DfLootPlugin(Star):
                 "/df 上报测试 — 把本群设为「软件测试上报」推送群\n"
                 "/df 取消上报测试 — 取消本群测试推送\n"
                 "/df 今日战绩 <游戏ID> — 查询该玩家今日出货战绩\n"
-                "/df 今日排行 — 生成今日出货排行榜汇总\n"
+                "/df 今日排行 — 生成今日出货排行榜（排序依据见设置）\n"
                 "/df 卡战备 <11/18/55/60/78w> — 查询卡战备配装（如 60w）\n"
                 "/df 测试 — 用当前数据渲染一张卡片（需调试群）"
             )
