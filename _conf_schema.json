@@ -1,143 +1,228 @@
 {
-  "df_overlay_url": {
-    "description": "Overlay 服务地址",
-    "type": "string",
-    "default": "http://192.168.1.5:8788",
-    "hint": "delta-force-overlay 的地址。插件通过 /api/state 读取对局数据。示例：http://192.168.1.5:8788"
+  "basic": {
+    "description": "① 基础连接",
+    "hint": "插件连哪个 overlay、多久轮询一次",
+    "type": "object",
+    "items": {
+      "df_overlay_url": {
+        "description": "Overlay 服务地址",
+        "type": "string",
+        "default": "http://192.168.1.5:8788",
+        "hint": "delta-force-overlay 的地址。插件通过 /api/state 读取对局数据。示例：http://192.168.1.5:8788"
+      },
+      "df_poll_interval": {
+        "description": "轮询间隔（秒）",
+        "type": "int",
+        "default": 20,
+        "hint": "多久检查一次 overlay 的新对局。建议 20-60 秒"
+      },
+      "df_startup_backfill_minutes": {
+        "description": "启动时回填时间（分钟）",
+        "type": "int",
+        "default": 10,
+        "hint": "插件启动时，会检查最近这么多分钟内的对局，避免重启漏播。填 0 表示不回填"
+      }
+    }
   },
-  "df_broadcast_enabled": {
-    "description": "出货播报开关",
-    "type": "bool",
-    "default": true,
-    "hint": "关闭后不再自动播报出货（/df 卡战备、/df 今日战绩 等查询命令不受影响）"
+
+  "broadcast": {
+    "description": "② 播报开关",
+    "hint": "要不要播报、播给谁",
+    "type": "object",
+    "items": {
+      "df_broadcast_enabled": {
+        "description": "出货播报开关",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后不再自动播报出货（/df 卡战备、/df 今日战绩 等查询命令不受影响）"
+      },
+      "df_broadcast_groups": {
+        "description": "播报目标群",
+        "type": "list",
+        "default": [],
+        "hint": "QQ官方机器人：填群的 group_openid（不是群号！在群里发 /df 订阅 会自动填入）；OneBot：填 QQ 群号。也可在群里发 /df 订阅 自动加入"
+      },
+      "df_at_all": {
+        "description": "播报时 @全体成员",
+        "type": "bool",
+        "default": false,
+        "hint": "出红时 @全体成员。注意：频繁 @全体可能被腾讯限制"
+      }
+    }
   },
-  "df_zhanbei_source": {
-    "description": "卡战备数据源",
-    "type": "string",
-    "default": "xb",
-    "options": [
-      "xb",
-      "overlay"
-    ],
-    "hint": "xb = 插件直连小黑盒（推荐，不需要运行软件）；overlay = 通过 delta-force-overlay 中转（需要软件运行）"
+
+  "filter": {
+    "description": "③ 播报筛选",
+    "hint": "满足什么条件才播：出什么、值多少、多久内",
+    "type": "object",
+    "items": {
+      "df_enable_red": {
+        "description": "播报红（grade 6）",
+        "type": "bool",
+        "default": true,
+        "hint": "出红色品质物品时播报。红清单：曼德尔超算单元、浓缩铀样本、火箭燃料、量子存储、实验数据、万足金条、鎏金卡牌等"
+      },
+      "df_enable_keycard": {
+        "description": "播报房卡（ID 1505 开头）",
+        "type": "bool",
+        "default": true,
+        "hint": "出房卡/门禁卡时播报。如食堂洗碗间、西区大门、西楼医务室、变电站宿舍等"
+      },
+      "df_only_escape": {
+        "description": "只播报撤离成功的对局",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，撤离失败的对局即使出了红也不播报"
+      },
+      "df_min_value": {
+        "description": "最低带出价值（万哈夫币）",
+        "type": "int",
+        "default": 0,
+        "hint": "带出价值低于此值的对局不播报。0 表示不限制。例如填 100 表示只播报带出超过 100 万的对局"
+      },
+      "df_max_age_min": {
+        "description": "过期对局过滤（分钟）",
+        "type": "int",
+        "default": 15,
+        "hint": "对局时间距现在超过这个分钟数就不播报了。防止软件重启后翻出旧对局、或上报延迟很久才到。填 0 表示不过滤"
+      }
+    }
   },
-  "df_render_mode": {
-    "description": "播报样式",
-    "type": "string",
-    "default": "card",
-    "options": [
-      "card",
-      "text",
-      "all"
-    ],
-    "hint": "card = 只发图片卡片；text = 只发文字；all = 文字 + 图片都发"
+
+  "card": {
+    "description": "④ 卡片样式",
+    "hint": "发图片还是文字、物品怎么排",
+    "type": "object",
+    "items": {
+      "df_render_mode": {
+        "description": "播报样式",
+        "type": "string",
+        "default": "card",
+        "options": [
+          "card",
+          "text",
+          "all"
+        ],
+        "hint": "card = 只发图片卡片；text = 只发文字；all = 文字 + 图片都发"
+      },
+      "df_item_layout": {
+        "description": "物品展示方式",
+        "type": "string",
+        "default": "grid",
+        "options": [
+          "grid",
+          "list"
+        ],
+        "hint": "grid = 网格（一行 3 个，紧凑，适合物品多的对局）；list = 列表（每个物品占一整行，图标更大、名称不截断）"
+      },
+      "df_show_items": {
+        "description": "卡片显示带出物品明细",
+        "type": "bool",
+        "default": true,
+        "hint": "列出本局带出的红/房卡（名称 + 数量 + 总价）"
+      },
+      "df_show_avatar": {
+        "description": "卡片显示账号头像",
+        "type": "bool",
+        "default": false,
+        "hint": "默认不显示。开启后左上角显示账号头像，关闭则显示红/房卡数量徽章"
+      },
+      "df_map_bg": {
+        "description": "卡片显示地图背景",
+        "type": "bool",
+        "default": true,
+        "hint": "头部背景铺对应对局的官方地图（自动定位建筑密集的核心区）。首次遇到某张地图会联网抓一次并缓存，之后离线可用"
+      },
+      "df_attach_text": {
+        "description": "卡片附带文字摘要",
+        "type": "bool",
+        "default": false,
+        "hint": "发图片卡片时额外附一条文字。注意：选中「card = 只发图片」时此项不生效"
+      }
+    }
   },
-  "df_broadcast_groups": {
-    "description": "播报目标群",
-    "type": "list",
-    "default": [],
-    "hint": "QQ官方机器人：填群的 group_openid（不是群号！在群里发 /df 订阅 会自动填入）；OneBot：填 QQ 群号。也可在群里发 /df 订阅 自动加入"
+
+  "daily": {
+    "description": "⑤ 每日汇总",
+    "hint": "每晚定时推送今日出货排行榜",
+    "type": "object",
+    "items": {
+      "df_daily_enabled": {
+        "description": "每日排行榜出货汇总",
+        "type": "bool",
+        "default": true,
+        "hint": "每天晚上定时向所有播报群推送今日出货排行榜 TOP 5，每人展开显示出了什么红装/房卡"
+      },
+      "df_daily_time": {
+        "description": "每日汇总时间",
+        "type": "string",
+        "default": "23:50",
+        "hint": "24 小时制，格式 HH:MM。默认 23:50（晚上 11 点 50 分）"
+      }
+    }
   },
-  "df_enable_red": {
-    "description": "播报红（grade 6）",
-    "type": "bool",
-    "default": true,
-    "hint": "出红色品质物品时播报。红清单：曼德尔超算单元、浓缩铀样本、火箭燃料、量子存储、实验数据、万足金条、鎏金卡牌等"
+
+  "datasource": {
+    "description": "⑥ 数据源",
+    "hint": "其他查询功能的数据来源",
+    "type": "object",
+    "items": {
+      "df_zhanbei_source": {
+        "description": "卡战备数据源",
+        "type": "string",
+        "default": "xb",
+        "options": [
+          "xb",
+          "overlay"
+        ],
+        "hint": "xb = 插件直连小黑盒（推荐，不需要运行软件）；overlay = 通过 delta-force-overlay 中转（需要软件运行）"
+      }
+    }
   },
-  "df_enable_keycard": {
-    "description": "播报房卡（ID 1505 开头）",
-    "type": "bool",
-    "default": true,
-    "hint": "出房卡/门禁卡时播报。如食堂洗碗间、西区大门、西楼医务室、变电站宿舍等"
+
+  "report": {
+    "description": "⑦ 外部上报（进阶）",
+    "hint": "让别人的 overlay 把出货推过来，需要内网穿透。不懂可全部留空",
+    "type": "object",
+    "items": {
+      "df_report_enabled": {
+        "description": "开放外部上报接口",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后其他玩家的 overlay 可以 POST 到 /df/report，由本插件统一播报。需要配合内网穿透使用"
+      },
+      "df_report_token": {
+        "description": "上报鉴权 Token",
+        "type": "string",
+        "default": "",
+        "hint": "开启上报时必填！随意一串长密码（建议 32 位）。别人的 overlay 里要填同样的值，否则会被拒绝"
+      },
+      "df_report_port": {
+        "description": "上报服务端口",
+        "type": "int",
+        "default": 8790,
+        "hint": "插件会在这个端口起一个独立 HTTP 服务接收上报。Docker 里需要把这个端口映射出来（默认 8790）"
+      },
+      "df_report_test_groups": {
+        "description": "软件测试上报推送群",
+        "type": "list",
+        "default": [],
+        "hint": "软件设置页点「测试上报」时，只推送到这些群，不会打扰正式播报群。在群里发 /df 上报测试 自动添加"
+      }
+    }
   },
-  "df_min_value": {
-    "description": "最低带出价值（万哈夫币）",
-    "type": "int",
-    "default": 0,
-    "hint": "带出价值低于此值的对局不播报。0 表示不限制。例如填 100 表示只播报带出超过 100 万的对局"
-  },
-  "df_only_escape": {
-    "description": "只播报撤离成功的对局",
-    "type": "bool",
-    "default": false,
-    "hint": "开启后，撤离失败的对局即使出了红也不播报"
-  },
-  "df_poll_interval": {
-    "description": "轮询间隔（秒）",
-    "type": "int",
-    "default": 30,
-    "hint": "多久检查一次 overlay 的新对局。建议 20-60 秒"
-  },
-  "df_show_avatar": {
-    "description": "卡片显示账号头像",
-    "type": "bool",
-    "default": false,
-    "hint": "默认不显示。开启后左上角显示账号头像，关闭则显示红/房卡数量徽章"
-  },
-  "df_show_items": {
-    "description": "卡片显示带出物品明细",
-    "type": "bool",
-    "default": true,
-    "hint": "列出本局带出的红/房卡（名称 + 数量 + 单价）"
-  },
-  "df_attach_text": {
-    "description": "卡片附带文字摘要",
-    "type": "bool",
-    "default": true,
-    "hint": "发图片卡片时额外附一条文字：谁、在哪、什么时候、出了什么。方便快速扫读和搜索"
-  },
-  "df_at_all": {
-    "description": "播报时 @全体成员",
-    "type": "bool",
-    "default": false,
-    "hint": "出红时 @全体成员。注意：频繁 @全体可能被腾讯限制"
-  },
-  "df_daily_enabled": {
-    "description": "每日排行榜出货汇总",
-    "type": "bool",
-    "default": true,
-    "hint": "每天晚上定时向所有播报群推送今日出货排行榜 TOP 5，每人展开显示出了什么红装/房卡"
-  },
-  "df_daily_time": {
-    "description": "每日汇总时间",
-    "type": "string",
-    "default": "23:50",
-    "hint": "24 小时制，格式 HH:MM。默认 23:50（晚上 11 点 50 分）"
-  },
-  "df_report_enabled": {
-    "description": "开放外部上报接口",
-    "type": "bool",
-    "default": false,
-    "hint": "开启后其他玩家的 overlay 可以 POST 到 /df/report，由本插件统一播报。需要配合内网穿透使用"
-  },
-  "df_report_token": {
-    "description": "上报鉴权 Token",
-    "type": "string",
-    "default": "",
-    "hint": "必填！随意一串长密码（建议 32 位）。别人的 overlay 里要填同样的值，否则会被拒绝"
-  },
-  "df_report_port": {
-    "description": "上报服务端口",
-    "type": "int",
-    "default": 8790,
-    "hint": "插件会在这个端口起一个独立 HTTP 服务接收上报。Docker 里需要把这个端口映射出来（默认 8790）"
-  },
-  "df_debug_groups": {
-    "description": "调试群（可用管理命令）",
-    "type": "list",
-    "default": [],
-    "hint": "只有这些群里能使用 /df 状态、/df 测试 等管理命令。QQ官方机器人填 group_openid"
-  },
-  "df_report_test_groups": {
-    "description": "软件测试上报推送群",
-    "type": "list",
-    "default": [],
-    "hint": "软件设置页点「测试上报」时，只推送到这些群，不会打扰正式播报群。在群里发 /df 上报测试 自动添加"
-  },
-  "df_startup_backfill_minutes": {
-    "description": "启动时回填时间（分钟）",
-    "type": "int",
-    "default": 10,
-    "hint": "插件启动时，会检查最近这么多分钟内的对局，避免重启漏播。填 0 表示不回填"
+
+  "debug": {
+    "description": "⑧ 调试",
+    "hint": "排查问题用，日常可以留空",
+    "type": "object",
+    "items": {
+      "df_debug_groups": {
+        "description": "调试群（可用管理命令）",
+        "type": "list",
+        "default": [],
+        "hint": "只有这些群里能使用 /df 状态、/df 测试 等管理命令。QQ官方机器人填 group_openid"
+      }
+    }
   }
 }
