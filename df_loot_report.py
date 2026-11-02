@@ -79,6 +79,8 @@ def parse_report(payload: dict[str, Any]) -> LootBattle | None:
                         is_red=bool(x.get("isRed")) or grade == 6,
                         is_keycard=bool(x.get("isKey"))
                         or str(x.get("id") or "").startswith("1505"),
+                        # 带上真实图标地址（软件上报时若有），没给就留空由插件猜
+                        pic=str(x.get("pic") or x.get("picUrl") or x.get("icon") or ""),
                     )
                 )
             except (TypeError, ValueError):
