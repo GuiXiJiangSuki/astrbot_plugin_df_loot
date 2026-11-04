@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import io
+import os
 from typing import Any
 
 from PIL import Image, ImageDraw
@@ -35,7 +36,12 @@ RED = (255, 110, 110)
 
 
 def dedup_items(items: list[dict]) -> list[dict]:
-    """小黑盒原始数据里有同名重复项，按名称去重。"""
+    """按名称去重（**仅用于统计/文字版**，卡片渲染不走这里）。
+
+    为什么卡片不去重：软件「卡战备」页是把小黑盒原始列表**原样全列出来**的
+    （同一把枪可能因为不同改件组合重复出现多次），
+    去重会让人以为「物品少了」，和软件对不上。
+    """
     seen = set()
     out = []
     for it in items:
@@ -48,7 +54,7 @@ def dedup_items(items: list[dict]) -> list[dict]:
 
 
 def _grad_bg(w: int, h: int) -> Image.Image:
-    """垂直渐变背景。"""
+    """垂直渐变背景（无壁纸时的兜底）。"""
     img = Image.new("RGB", (w, h), BG_BOT)
     d = ImageDraw.Draw(img)
     for y in range(h):
@@ -60,9 +66,91 @@ def _grad_bg(w: int, h: int) -> Image.Image:
     return img
 
 
+# ── 官方壁纸背景 ──
+# 来源：https://www.wegame.com.cn/helper/df/ 的 bg-1113（4K 烟花角色群像）
+# 已缩到 1920×1080 + JPEG(q88) 存本地，避免每次联网
+_BG_FILE = os.path.join(os.path.dirname(__file__), "zb_bg.jpg")
+_bg_cache: dict[int, Image.Image] = {}
+
+
+def _wallpaper_bg(w: int, h: int) -> Image.Image:
+    """用官方壁纸做背景：cover 裁剪 + 压暗，保证上层文字可读。
+
+    缓存按 (w,h) 复用解码结果，避免每帧都读盘解码。
+    """
+    key = (w, h)
+    if key in _bg_cache:
+        return _bg_cache[key].copy()
+
+    img = None
+    try:
+        src = Image.open(_BG_FILE).convert("RGB")
+    except Exception:  # noqa: BLE001
+        src = None
+
+    if src is None:
+        img = _grad_bg(w, h)
+        _bg_cache[key] = img
+        return img.copy()
+
+    # cover：等比缩放到铺满，再居中裁剪
+    sw, sh = src.size
+    scale = max(w / sw, h / sh)
+    nw, nh = max(w, int(sw * scale + 0.5)), max(h, int(sh * scale + 0.5))
+    src = src.resize((nw, nh), Image.LANCZOS)
+    left = (nw - w) // 2
+    # 纵向偏上取景：烟花和角色在画面上半部分，别裁掉
+    top = max(0, int((nh - h) * 0.35))
+    img = src.crop((left, top, left + w, top + h))
+
+    # 压暗 + 顶部/底部渐隐：
+    #   壁纸保持可辨认（乘 0.46），只在四个方向加暗角，
+    #   让金色标题和卡片能浮起来，同时壁纸还能看出烟花和角色。
+    img = Image.eval(img, lambda v: int(v * 0.46))
+    # 轻微虚化：壁纸不该抢文字注意力（用缩小再放大的低成本方式）
+    try:
+        small = img.resize((max(1, w // 6), max(1, h // 6)), Image.BILINEAR)
+        img = small.resize((w, h), Image.BILINEAR)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 四周暗角：上下各一条渐变黑，左右轻压，做出「卡片浮在壁纸上」的层次
+    vign = Image.new("L", (w, h), 0)
+    vd = ImageDraw.Draw(vign)
+    top_fade = int(h * 0.30)
+    bot_fade = int(h * 0.26)
+    for i in range(top_fade):
+        vd.line([(0, i), (w, i)], fill=int(150 * (1 - i / top_fade)))
+    for i in range(bot_fade):
+        y2 = h - 1 - i
+        vd.line([(0, y2), (w, y2)], fill=int(170 * (1 - i / bot_fade)))
+    black = Image.new("RGB", (w, h), (0, 0, 0))
+    img = Image.composite(black, img, vign)
+
+    _bg_cache[key] = img
+    return img.copy()
+
+
 def _rrect(d: ImageDraw.ImageDraw, box, r: int, fill=None, outline=None, width: int = 1):
-    """圆角矩形。"""
+    """圆角矩形（实心）。"""
     d.rounded_rectangle(box, radius=r, fill=fill, outline=outline, width=width)
+
+
+def _glass_card(img: Image.Image, box, r: int, alpha: int = 168,
+                fill=(16, 19, 25), outline=(64, 72, 88), width: int = 2):
+    """半透明「磨砂玻璃」卡片：把深色以 alpha 叠在壁纸上，能透出背景。
+
+    这样既保证文字可读（底下是深色），又能看到壁纸的烟花和角色。
+    """
+    w = img.size[0]
+    h = img.size[1]
+    layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    ld = ImageDraw.Draw(layer)
+    ld.rounded_rectangle(box, radius=r, fill=(fill[0], fill[1], fill[2], alpha),
+                         outline=(outline[0], outline[1], outline[2], 220), width=width)
+    overlay = layer.convert("RGB")
+    mask = layer.split()[-1]
+    return Image.composite(overlay, img, mask)
 
 
 def render_zhanbei(
@@ -93,15 +181,21 @@ def render_zhanbei(
     W = PAD * 2 + COL_W * COLS + COL_GAP * (COLS - 1)
 
     # 每列物品数（取各列最大值决定高度）
+    # ⚠️ 不去重：软件「卡战备」页是把小黑盒原始列表原样全部列出来的
+    #   （同一把枪因不同改件组合会重复出现），去重会显得「少了东西」。
+    #   max_items 只作为极端保护（防止数据异常时图太高），默认不生效。
     col_items = []
     for sc in schemes:
-        items = dedup_items(sc.get("items") or [])[:max_items]
+        items = list(sc.get("items") or [])
+        if max_items and max_items > 0 and len(items) > max_items:
+            items = items[:max_items]
         col_items.append(items)
     max_rows = max((len(x) for x in col_items), default=1)
     body_h = CARD_HEAD + max_rows * ITEM_H + 14
     total_h = HEAD_H + body_h + PAD + 34
 
-    img = _grad_bg(W * scale, total_h * scale)
+    # 背景：官方壁纸（无壁纸时自动退回渐变）
+    img = _wallpaper_bg(W * scale, total_h * scale)
     d = ImageDraw.Draw(img)
 
     def S(v: float) -> int:
@@ -140,7 +234,12 @@ def render_zhanbei(
         items = col_items[idx]
         x0 = PAD + idx * (COL_W + COL_GAP)
         box = [S(x0), S(y0), S(x0 + COL_W), S(y0 + ch)]
-        _rrect(d, box, S(12), fill=CARD_BG, outline=CARD_BORDER, width=S(1))
+        # 半透明磨砂卡片：能看到壁纸，又保证文字清晰
+        # ⚠️ 原地 paste（不能 img = _glass_card(...)），否则 d 指向旧对象、
+        #    后面 d.text() 和 img.paste() 会画到两个不同图上，文字/图标全丢
+        glass = _glass_card(img, box, S(12), alpha=196)
+        img.paste(glass, (0, 0))
+        d = ImageDraw.Draw(img)
 
         # 卡片标题
         name = str(sc.get("schemeName") or f"方案{idx + 1}")
