@@ -551,6 +551,282 @@ class DfLootPlugin(Star):
             pass
         return out
 
+    async def _fetch_mate_rank(
+        self, limit: int = 10, range_key: str = "today", player: str = ""
+    ) -> dict:
+        """从排行服务拉「指定玩家」的队友出货排行。
+
+        player: 玩家名或 playerId（必填，否则拉全服汇总）
+        返回 {ok, found, player, range, days, total, scannedBattles,
+              battlesWithMates, list[]}
+        每个队友：{name, avatar, battles, escapes, escapeRate,
+                  gained, profit, kills, duration, items[]}
+        """
+        if aiohttp is None:
+            return {"ok": False, "list": [], "error": "缺少 aiohttp 依赖"}
+
+        rk = str(range_key or "today").strip().lower()
+        if rk == "yesterday":
+            from datetime import date, timedelta
+
+            rk = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        url = f"{self.rank_base}/api/rank/mates"
+        params = {"range": rk, "limit": str(max(1, min(int(limit), 100)))}
+        if player:
+            params["player"] = str(player)
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=25)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.get(url, params=params) as resp:
+                    if resp.status != 200:
+                        logger.warning("[df_loot] 队友排行接口返回 %s", resp.status)
+                        return {"ok": False, "list": [], "error": f"HTTP {resp.status}"}
+                    j = await resp.json(content_type=None)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[df_loot] 拉取队友排行失败: %s", exc)
+            return {"ok": False, "list": [], "error": str(exc)}
+
+        if not isinstance(j, dict) or not j.get("ok"):
+            return {"ok": False, "list": [], "error": "接口返回异常"}
+
+        if j.get("found") is False:
+            return {
+                "ok": True, "found": False, "player": "",
+                "list": [], "total": 0,
+                "hint": j.get("hint") or "没有找到该玩家",
+            }
+
+        rows = [p for p in (j.get("list") or []) if isinstance(p, dict)]
+        # 按净收益降序（服务端已排好，这里再保证一次）
+        rows = sorted(rows, key=lambda p: -(int(p.get("profit") or 0)))
+        for i, p in enumerate(rows):
+            p["rank"] = i + 1
+
+        return {
+            "ok": True,
+            "found": True,
+            "player": j.get("player") or player,
+            "range": j.get("range") or rk,
+            "days": j.get("days") or [],
+            "total": j.get("total") or len(rows),
+            "scannedBattles": j.get("scannedBattles") or 0,
+            "battlesWithMates": j.get("battlesWithMates") or 0,
+            "list": rows,
+        }
+
+    async def _fetch_mate_assets(self, players: list) -> tuple[dict, dict]:
+        """下载队友头像 + 物品图标。返回 (avatars_by_name, item_pics_by_name)。"""
+        if aiohttp is None:
+            return {}, {}
+        av_pairs = {}
+        item_pairs = {}
+        for p in players:
+            name = str(p.get("name") or "")
+            av = str(p.get("avatar") or "")
+            if name and av.startswith("http"):
+                av_pairs[name] = av
+            for it in (p.get("items") or []):
+                pic = str(it.get("pic") or "")
+                iname = str(it.get("name") or "")
+                if iname and pic.startswith("http"):
+                    item_pairs[iname] = pic
+
+        avatars, pics = {}, {}
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async def get_one(url):
+                    try:
+                        async with sess.get(url) as r:
+                            if r.status == 200:
+                                return await r.read()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return None
+
+                av_tasks = [get_one(u) for u in av_pairs.values()]
+                it_tasks = [get_one(u) for u in item_pairs.values()]
+                results = await asyncio.gather(*(av_tasks + it_tasks))
+
+                n = len(av_tasks)
+                for (name, _), data in zip(av_pairs.items(), results[:n]):
+                    if data:
+                        avatars[name] = data
+                for (iname, _), data in zip(item_pairs.items(), results[n:]):
+                    if data:
+                        pics[iname] = data
+        except Exception:  # noqa: BLE001
+            pass
+        return avatars, pics
+
+    async def _mate_report(
+        self,
+        *,
+        target_groups: list | None = None,
+        range_key: str = "today",
+        top_n: int | None = None,
+        player: str = "",
+    ) -> None:
+        """队友出货排行（/df 今日队友出货 <玩家ID>）。"""
+        if target_groups:
+            groups = list(target_groups)
+        else:
+            groups = self.groups
+        if not groups:
+            logger.info("[df_loot] 队友排行：没有配置群，跳过")
+            return
+
+        # 显示人数：显式传入 > 配置 > 默认 10
+        if top_n is None:
+            try:
+                top_n = int(self._cfg("df_mate_top", 10))
+            except (TypeError, ValueError):
+                top_n = 10
+        top_n = max(1, min(int(top_n or 10), 20))
+
+        data = await self._fetch_mate_rank(top_n, range_key, player=player)
+
+        # 玩家不存在
+        if data.get("found") is False:
+            if target_groups:
+                try:
+                    msg = (
+                        f"【队友出货排行】\n\n"
+                        f"没有找到玩家「{player}」。\n"
+                        f"（只有使用 delta-force-overlay 并开启排行榜同步的玩家才有数据）"
+                    )
+                    for gid in target_groups:
+                        await self._send_to_group(gid, [Plain(msg)])
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+
+        if not data.get("ok"):
+            if target_groups:
+                try:
+                    msg = f"【队友出货排行】\n\n查询失败：{data.get('error') or '接口异常'}"
+                    for gid in target_groups:
+                        await self._send_to_group(gid, [Plain(msg)])
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+
+        players = data["list"][:top_n]
+        target_player = data.get("player") or player
+
+        if not players:
+            logger.info("[df_loot] 队友排行：该玩家没有队友数据（player=%s）", target_player)
+            if target_groups:
+                try:
+                    scanned = data.get("scannedBattles") or 0
+                    msg = (
+                        f"【{target_player} · 队友出货排行】\n\n"
+                        f"今天还没有队友数据（扫描 {scanned} 局）。\n"
+                        f"可能原因：\n"
+                        f"· 该玩家还没更新到 v2.3.1（旧版不上报队友战绩）\n"
+                        f"· 软件还没爬取队友数据（空闲时自动爬，每局间隔 2.5 秒）\n"
+                        f"· 今天确实是一个人打的"
+                    )
+                    for gid in target_groups:
+                        await self._send_to_group(gid, [Plain(msg)])
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+
+        # 日期标签
+        from datetime import date, datetime, timedelta
+
+        rk = str(range_key or "today").strip().lower()
+        if rk == "yesterday":
+            date_label = (date.today() - timedelta(days=1)).strftime("%m-%d")
+        elif rk in ("today", ""):
+            date_label = datetime.now().strftime("%m-%d")
+        else:
+            date_label = rk
+
+        # 卡片标题用「玩家名 + 日期」
+        title_label = f"{target_player} · {date_label}" if target_player else date_label
+
+        avatars, pics = await self._fetch_mate_assets(players)
+        logger.info("[df_loot] 队友排行：%s · 头像 %s 个 · 物品图 %s 张",
+                    target_player or "全服", len(avatars), len(pics))
+
+        # 渲染卡片
+        image_comp = None
+        try:
+            from .df_loot_mate_card import render_mate_rank
+        except ImportError:
+            from df_loot_mate_card import render_mate_rank
+
+        try:
+            png = render_mate_rank(
+                date_label=title_label,
+                players=players,
+                avatars=avatars,
+                item_pics=pics,
+                max_players=top_n,
+            )
+            image_comp = Image.fromBase64(base64.b64encode(png).decode("ascii"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[df_loot] 队友排行卡片渲染失败: %s", exc)
+
+        # 文字版兜底
+        _word = "昨日" if rk == "yesterday" else "今日"
+        text_lines = [f"【{target_player or '全服'} · {_word}队友出货排行 · {date_label}】", ""]
+        for i, p in enumerate(players, 1):
+            profit = int(p.get("profit") or 0)
+            gained = int(p.get("gained") or 0)
+            battles = int(p.get("battles") or 0)
+            rate = p.get("escapeRate") or 0
+            sign = "+" if profit >= 0 else ""
+            text_lines.append(
+                f"#{i} {p.get('name')} — 带出 {self._fmt_money(gained)}"
+                f" · 净收益 {sign}{self._fmt_money(profit)}"
+                f"（{battles} 局 · 撤离率 {rate}%）"
+            )
+            its = (p.get("items") or [])[:4]
+            if its:
+                names = "、".join(
+                    f"{it.get('name')}×{it.get('num')}" if int(it.get("num") or 1) > 1
+                    else str(it.get("name"))
+                    for it in its
+                )
+                text_lines.append(f"   出货：{names}")
+            text_lines.append("")
+        text_lines.append("————————————")
+        text_lines.append("数据来自各玩家软件自动上传")
+        text = "\n".join(text_lines)
+
+        # 按「播报样式」决定发图还是发文字
+        mode = str(self._cfg("df_render_mode", "card")).strip().lower()
+        if mode not in ("card", "text", "all"):
+            mode = "card"
+        want_image = mode in ("card", "all")
+        want_text = mode in ("text", "all")
+        if image_comp is None and want_image and not want_text:
+            want_text = True
+
+        sent = 0
+        for gid in groups:
+            try:
+                ok = True
+                if want_text:
+                    ok = await self._send_to_group(gid, [Plain(text)])
+                if ok and want_image and image_comp is not None:
+                    if want_text:
+                        await asyncio.sleep(1.2)
+                    ok = await self._send_to_group(gid, [image_comp])
+                if ok:
+                    sent += 1
+                if len(groups) > 1:
+                    await asyncio.sleep(0.8)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[df_loot] 队友排行发送到群 %s 失败: %s", gid, exc)
+
+        logger.info("[df_loot] 队友排行已推送 → %s 个群（TOP %d）", sent, len(players))
+
     def _build_rank_daily_text(self, players: list, date: str, is_yesterday: bool = False) -> str:
         """排行榜汇总的文字版。"""
         sort_by = str(self._cfg("df_rank_sort", "gained")).strip().lower()
@@ -1688,6 +1964,8 @@ class DfLootPlugin(Star):
                 "/df 今日战绩 <游戏ID> — 查询该玩家今日出货战绩\n"
                 "/df 今日排行 — 生成今日出货排行榜（排序依据见设置）\n"
                 "/df 昨日排行 — 生成昨日出货排行榜\n"
+                "/df 今日队友出货 <ID> — 该玩家今日队友的出货排行\n"
+                "/df 昨日队友出货 <ID> — 该玩家昨日队友的出货排行\n"
                 "/df 卡战备 <11/18/55/60/78w> — 查询卡战备配装（如 60w）\n"
                 "/df 测试 — 用当前数据渲染一张卡片（需调试群）"
             )
@@ -1816,6 +2094,51 @@ class DfLootPlugin(Star):
                 yield event.plain_result(f"生成失败：{exc}")
             return
 
+        # 「队友」和「野人」都指同一功能（玩家口语里常叫野人）
+        # 今日 / 昨日 两套触发词，通过 range_key 区分
+        _MATE_TODAY = ("今日队友出货", "今天队友出货", "今日野人出货", "今天野人出货",
+                       "队友出货", "野人出货", "队友排行", "野人排行",
+                       "今日队友排行", "今天队友排行", "今日野人排行", "今天野人排行",
+                       "队友榜", "野人榜", "队友榜单", "野人榜单",
+                       "队友出货排行", "野人出货排行",
+                       "队友出货榜", "野人出货榜")
+        _MATE_YESTERDAY = ("昨日队友出货", "昨天队友出货", "昨日野人出货", "昨天野人出货",
+                           "昨日队友排行", "昨天队友排行", "昨日野人排行", "昨天野人排行",
+                           "昨日队友榜", "昨天队友榜", "昨日野人榜", "昨天野人榜",
+                           "昨日队友榜单", "昨天队友榜单", "昨日野人榜单", "昨天野人榜单",
+                           "昨日队友出货排行", "昨天队友出货排行",
+                           "昨日野人出货排行", "昨天野人出货排行",
+                           "昨日队友出货榜", "昨天队友出货榜",
+                           "昨日野人出货榜", "昨天野人出货榜")
+        if sub in _MATE_TODAY or sub in _MATE_YESTERDAY:
+            is_yesterday = sub in _MATE_YESTERDAY
+            cur_gid = self._group_key(event)
+            if not cur_gid:
+                yield event.plain_result("无法识别当前群，请在群里使用该命令")
+                return
+            # 解析玩家 ID（sub 之后的所有参数，允许带空格的名字）
+            target = " ".join(args[1:]).strip() if len(args) > 1 else ""
+            word = "昨日" if is_yesterday else "今日"
+            if not target:
+                yield event.plain_result(
+                    f"用法：/df {word}队友出货 <游戏ID>\n"
+                    f"例如：/df {word}队友出货 鬼汐酱\n\n"
+                    f"会显示该玩家{word}所有对局里，队友们的出货排行\n"
+                    f"（需要队友也使用本软件，且玩家软件更新到 v2.3.1+）"
+                )
+                return
+            yield event.plain_result(f"正在查询「{target}」{word}的队友出货排行…")
+            try:
+                await self._mate_report(
+                    target_groups=[cur_gid],
+                    range_key="yesterday" if is_yesterday else "today",
+                    player=target,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[df_loot] 队友出货排行失败: %s", exc)
+                yield event.plain_result(f"生成失败：{exc}")
+            return
+
         if sub in ("卡战备", "战备"):
             arg = " ".join(args[1:]).strip()
             if not arg:
@@ -1871,7 +2194,7 @@ class DfLootPlugin(Star):
                         target=target,
                         schemes=schemes,
                         source=data.get("source") or "xb",
-                        max_items=8,
+                        max_items=0,      # 0 = 不限制，原样显示全部（和软件一致）
                         item_pics=pics,
                         logo=self._load_logo(),
                     )
