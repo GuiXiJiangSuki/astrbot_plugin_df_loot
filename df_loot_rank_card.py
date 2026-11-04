@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import io
+import os
 from typing import Any
 
 from PIL import Image, ImageDraw
@@ -46,6 +47,76 @@ def _grad_bg(w: int, h: int) -> Image.Image:
         b = int(BG_TOP[2] + (BG_BOT[2] - BG_TOP[2]) * t)
         d.line([(0, y), (w, y)], fill=(r, g, b))
     return img
+
+
+# ── 官方壁纸背景（和卡战备同源，取不同区域以区分视觉）──
+# 来源：https://www.wegame.com.cn/helper/df/ 的 4K 壁纸「营火 + 角色群像」
+_BG_FILE = os.path.join(os.path.dirname(__file__), "rank_bg.jpg")
+_bg_cache: dict[int, Image.Image] = {}
+
+
+def _wallpaper_bg(w: int, h: int) -> Image.Image:
+    """壁纸做背景：cover 裁剪 + 压暗 + 虚化，保证文字可读。"""
+    key = (w, h)
+    if key in _bg_cache:
+        return _bg_cache[key].copy()
+
+    src = None
+    try:
+        src = Image.open(_BG_FILE).convert("RGB")
+    except Exception:  # noqa: BLE001
+        src = None
+
+    if src is None:
+        img = _grad_bg(w, h)
+        _bg_cache[key] = img
+        return img.copy()
+
+    sw, sh = src.size
+    scale = max(w / sw, h / sh)
+    nw, nh = max(w, int(sw * scale + 0.5)), max(h, int(sh * scale + 0.5))
+    src = src.resize((nw, nh), Image.LANCZOS)
+    left = (nw - w) // 2
+    top = max(0, int((nh - h) * 0.45))
+    img = src.crop((left, top, left + w, top + h))
+
+    # 压暗（排行榜文字密集，比卡战备更暗一些）
+    img = Image.eval(img, lambda v: int(v * 0.40))
+    # 虚化：缩小再放大，低成本
+    try:
+        img = img.resize((max(1, w // 6), max(1, h // 6)), Image.BILINEAR)
+        img = img.resize((w, h), Image.BILINEAR)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 上下渐隐暗角
+    vign = Image.new("L", (w, h), 0)
+    vd = ImageDraw.Draw(vign)
+    top_fade = int(h * 0.22)
+    bot_fade = int(h * 0.20)
+    for i in range(top_fade):
+        vd.line([(0, i), (w, i)], fill=int(140 * (1 - i / top_fade)))
+    for i in range(bot_fade):
+        y2 = h - 1 - i
+        vd.line([(0, y2), (w, y2)], fill=int(160 * (1 - i / bot_fade)))
+    black = Image.new("RGB", (w, h), (0, 0, 0))
+    img = Image.composite(black, img, vign)
+
+    _bg_cache[key] = img
+    return img.copy()
+
+
+def _glass_card(img: Image.Image, box, r: int, alpha: int = 190,
+                fill=(16, 19, 25), outline=(70, 78, 96), width: int = 2) -> Image.Image:
+    """半透明磨砂卡片：透出壁纸，同时保证文字清晰。"""
+    w, h = img.size
+    layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    ld = ImageDraw.Draw(layer)
+    ld.rounded_rectangle(box, radius=r,
+                         fill=(fill[0], fill[1], fill[2], alpha),
+                         outline=(outline[0], outline[1], outline[2], 220),
+                         width=width)
+    return Image.composite(layer.convert("RGB"), img, layer.split()[-1])
 
 
 def _circle_avatar(img: Image.Image, data: bytes | None, size: int, xy: tuple) -> None:
@@ -201,7 +272,8 @@ def render_rank_daily(
     body_h = sum(heights) + PLAYER_GAP * max(0, len(players) - 1)
     total_h = HEAD_H + body_h + PAD + 34
 
-    img = _grad_bg(W * scale, total_h * scale)
+    # 背景：官方壁纸（无壁纸时自动退回渐变）
+    img = _wallpaper_bg(W * scale, total_h * scale)
     d = ImageDraw.Draw(img)
 
     def S(v: float) -> int:
@@ -260,9 +332,12 @@ def render_rank_daily(
         pid = str(p.get("playerId") or "")
 
         ph = heights[idx]
-        d.rounded_rectangle([S(PAD), S(y), S(W - PAD), S(y + ph)],
-                            radius=S(12), fill=CARD_BG,
-                            outline=CARD_BORDER, width=S(1))
+        # 半透明磨砂卡片：透出壁纸，同时保证文字清晰
+        # ⚠️ 必须原地修改 img（不能 img = _glass_card(...)），
+        #    否则 d 指向旧对象、img 是新对象，后续 d.text() 画在旧图上全部丢失
+        glass = _glass_card(img, [S(PAD), S(y), S(W - PAD), S(y + ph)], S(12), alpha=188)
+        img.paste(glass, (0, 0))
+        d = ImageDraw.Draw(img)
 
         rank_col = GOLD if rank == 1 else (SILVER if rank == 2 else (BRONZE if rank == 3 else DIM))
 
@@ -323,7 +398,7 @@ def render_rank_daily(
             tag_w = d.textlength(label, font=_font(S(14)))
             d.rounded_rectangle(
                 [S(inner_x), S(iy), S(inner_x + tag_w + 22), S(iy + 26)],
-                radius=S(6), fill=(18, 20, 26), outline=col, width=S(1),
+                radius=S(6), fill=(10, 12, 16), outline=col, width=S(1),
             )
             d.text((S(inner_x + 11), S(iy + 4)), label, font=_font(S(14)), fill=col)
             iy += GROUP_LABEL_H
