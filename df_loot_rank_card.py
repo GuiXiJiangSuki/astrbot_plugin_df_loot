@@ -362,28 +362,42 @@ def render_rank_daily(
         d.text((S(nx), S(y + 52)), meta, font=_font(S(15), False), fill=SUB)
 
         # 右侧：主指标（大字）跟着排序依据走
-        #   gained 模式 → 大字带出、绿字净收益
-        #   profit 模式 → 大字净收益、绿字带出
-        if str(sort_by).lower() == "profit":
+        #   gained 模式 → 大字带出、净收益小字（正绿负红）
+        #   profit 模式 → 大字净收益（正绿负红）、带出小字金色
+        def _profit_text(v: int) -> str:
+            """净收益文案：正数带 +，负数保留 -，0 显示 0。"""
+            n = int(v or 0)
+            if n == 0:
+                return "0"
+            return ("+" if n > 0 else "") + _fmt_amount(n)
+
+        is_profit_sort = str(sort_by).lower() == "profit"
+        if is_profit_sort:
             main_val, main_lab = (profit or 0), "净收益"
             sub_val, sub_lab = (gained or 0), "带出"
-            main_col = GREEN
+            main_col = GREEN if (profit or 0) >= 0 else RED
+            sub_col = GOLD
         else:
             main_val, main_lab = (gained or 0), "带出"
             sub_val, sub_lab = (profit or 0), "净收益"
             main_col = GOLD
+            sub_col = GREEN if (profit or 0) >= 0 else RED
 
-        gs = _fmt_amount(main_val)
+        # 主指标文案：净收益要带正负号
+        if main_lab == "净收益":
+            gs = _profit_text(main_val)
+        else:
+            gs = _fmt_amount(main_val)
         gw = d.textlength(gs, font=_font(S(27)))
         d.text((S(W - PAD - 18) - gw, S(y + 16)), gs, font=_font(S(27)), fill=main_col)
         lw = d.textlength(main_lab, font=_font(S(12), False))
         d.text((S(W - PAD - 18) - lw, S(y + 48)), main_lab, font=_font(S(12), False), fill=DIM)
 
-        # 右侧：副指标（绿色小字，在主指标下方）
+        # 右侧：副指标（小字，在主指标下方）
         if sub_val:
-            ps = sub_lab + " " + _fmt_amount(sub_val)
+            sub_txt = _profit_text(sub_val) if sub_lab == "净收益" else _fmt_amount(sub_val)
+            ps = sub_lab + " " + sub_txt
             pw = d.textlength(ps, font=_font(S(13)))
-            sub_col = GOLD if str(sort_by).lower() == "profit" else GREEN
             d.text((S(W - PAD - 18) - pw, S(y + 66)), ps,
                    font=_font(S(13)), fill=sub_col)
 
