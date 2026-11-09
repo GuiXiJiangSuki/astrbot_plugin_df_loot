@@ -37,6 +37,57 @@
 
 ---
 
+## 📦 安装
+
+### 方式一：插件市场（推荐）
+
+AstrBot 面板 → **插件管理** → **插件市场** → 搜索「三角洲出货播报」→ 安装。
+
+> ⚠️ 市场的版本同步有延迟（由 AstrBot 官方扫描，不由我们控制）。
+> 如果市场里显示的不是最新版，用下面的「方式二」直接装。
+
+### 方式二：从 GitHub 直装（永远是最新版）
+
+在 AstrBot 面板 → **插件管理** → **安装** → **从 URL 安装**，粘贴：
+
+```
+https://github.com/GuiXiJiangSuki/astrbot_plugin_df_loot
+```
+
+点安装即可。AstrBot 会自动拉取本仓库最新代码。
+
+### 方式三：手动覆盖
+
+```bash
+# 进入插件目录
+cd /AstrBot/data/plugins
+
+# 备份旧版
+mv astrbot_plugin_df_loot astrbot_plugin_df_loot.bak
+
+# 下载最新版（把 vX.Y.Z 换成最新 tag）
+wget https://github.com/GuiXiJiangSuki/astrbot_plugin_df_loot/archive/refs/tags/v1.1.1.tar.gz
+tar -xzf v1.1.1.tar.gz
+mv astrbot_plugin_df_loot-1.1.1 astrbot_plugin_df_loot
+
+# 重启 AstrBot
+```
+
+### 更新到最新版
+
+```bash
+cd /AstrBot/data/plugins/astrbot_plugin_df_loot
+
+# 如果当初是 git clone 的
+git pull
+
+# 否则重新下载覆盖（保留 config 和 data 目录）
+```
+
+> 检查当前版本：看 `metadata.yaml` 里的 `version:` 字段，或 AstrBot 面板插件列表。
+
+---
+
 ## 功能
 
 | 功能 | 说明 |
@@ -49,7 +100,24 @@
 | **灵活过滤** | 按带出价值、是否撤离、物品类型过滤 |
 | **多平台** | 支持 aiocqhttp（NapCat 等）和 QQ 官方机器人 |
 | **卡战备查询** | 群内查任意价位的配装方案，支持图片卡片 |
-| **出货排行榜** | 群内查今日全服出货 TOP 5，含红装/房卡明细 |
+| **出货排行榜** | 群内查全服出货排行，支持今日/昨日/3天 |
+| **队友出货排行** | 查某个玩家今天/昨天队友们的出货排行（带物品明细） |
+
+## 常用指令
+
+| 指令 | 说明 |
+|---|---|
+| `/df 帮助` | 查看所有指令 |
+| `/df 今日排行` | 今日全服出货排行 |
+| `/df 昨日排行` | 昨日全服出货排行 |
+| `/df 今日队友出货 <ID>` | 该玩家今日队友的出货排行 |
+| `/df 昨日队友出货 <ID>` | 该玩家昨日队友的出货排行 |
+| `/df 今日战绩 <ID>` | 查询玩家今日战绩 |
+| `/df 卡战备 <11/18/55/60/78w>` | 查询指定价位的配装方案 |
+| `/df 订阅` / `/df 取消订阅` | 管理本群的播报订阅 |
+| `/df 测试` | 用当前数据渲染一张卡片（需调试群） |
+
+> 「队友」也可写作「野人」，如 `/df 今日野人出货 鬼汐酱`
 
 ## 播报效果
 
