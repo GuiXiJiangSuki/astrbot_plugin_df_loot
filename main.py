@@ -780,10 +780,16 @@ class DfLootPlugin(Star):
             gained = int(p.get("gained") or 0)
             battles = int(p.get("battles") or 0)
             rate = p.get("escapeRate") or 0
-            sign = "+" if profit >= 0 else ""
+            # 净收益：正数带 +，负数用「净亏损」表述，0 不加符号
+            if profit > 0:
+                pf_txt = "净收益 +" + self._fmt_money(profit)
+            elif profit < 0:
+                pf_txt = "净亏损 " + self._fmt_money(abs(profit))
+            else:
+                pf_txt = "净收益 0"
             text_lines.append(
                 f"#{i} {p.get('name')} — 带出 {self._fmt_money(gained)}"
-                f" · 净收益 {sign}{self._fmt_money(profit)}"
+                f" · {pf_txt}"
                 f"（{battles} 局 · 撤离率 {rate}%）"
             )
             its = (p.get("items") or [])[:4]
@@ -840,7 +846,9 @@ class DfLootPlugin(Star):
             rank = p.get("rank") or (i + 1)
             name = p.get("name") or "未知"
             gained = self._fmt_money(p.get("gained") or 0)
-            profit = self._fmt_money(p.get("profit") or 0)
+            # 净收益：正数带 +（负数由 _fmt_money 自带 -）
+            _pf_raw = int(p.get("profit") or 0)
+            profit = ("+" if _pf_raw > 0 else "") + self._fmt_money(_pf_raw)
             battles = p.get("battles") or 0
             escapes = p.get("escapes") or 0
             red_n = p.get("redCount") or 0
