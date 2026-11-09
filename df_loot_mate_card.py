@@ -151,10 +151,19 @@ def render_mate_rank(
         d.text((S(W - PAD - 20) - lw, S(y + 50)), "带出",
                font=_font(S(12), False), fill=DIM)
 
-        ps = ("净收益 " if profit >= 0 else "净亏损 ") + _fmt_amount(abs(profit))
+        # 净收益：正数带 +（绿色），负数显示「净亏损」（红色）
+        if profit > 0:
+            ps = "净收益 +" + _fmt_amount(profit)
+            pcol = GREEN
+        elif profit < 0:
+            ps = "净亏损 " + _fmt_amount(abs(profit))
+            pcol = RED
+        else:
+            ps = "净收益 0"
+            pcol = DIM
         pw = d.textlength(ps, font=_font(S(14), True))
         d.text((S(W - PAD - 20) - pw, S(y + 68)), ps,
-               font=_font(S(14), True), fill=GREEN if profit >= 0 else RED)
+               font=_font(S(14), True), fill=pcol)
 
         # ── 物品行 ──
         its = (p.get("items") or [])[:items_per_player]
