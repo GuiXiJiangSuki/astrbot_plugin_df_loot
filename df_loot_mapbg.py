@@ -34,16 +34,65 @@ import json
 import os
 from typing import Any
 
-try:
-    from astrbot.api import logger
-except ImportError:  # pragma: no cover - 单测/脚本环境
-    import logging
+from astrbot.api import logger
 
-    logger = logging.getLogger(__name__)
+# 缓存目录必须放在 AstrBot 的 plugin_data 下（审核规范要求）
+#   data/plugin_data/<插件名>/cache/maps/
+# 不能写到插件源码目录 —— 那里是代码目录，持久化数据不该混进去。
+_PLUGIN_NAME = "astrbot_plugin_df_loot"
 
-# 插件目录下的缓存目录（与插件源码同级，随插件一起分发/清理）
-_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache", "maps")
+
+def _plugin_data_dir() -> str:
+    """定位 AstrBot 的 plugin_data 目录。
+
+    插件源码在 <AstrBot根>/data/plugins/astrbot_plugin_df_loot/，
+    所以往上两级就是 data/，再拼 plugin_data。
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    # here = .../data/plugins/astrbot_plugin_df_loot
+    data_root = os.path.dirname(os.path.dirname(here))
+    cand = os.path.join(data_root, "plugin_data", _PLUGIN_NAME)
+    return cand
+
+
+_CACHE_DIR = os.path.join(_plugin_data_dir(), "cache", "maps")
 _INDEX_FILE = os.path.join(_CACHE_DIR, "index.json")
+
+
+def _migrate_legacy_cache() -> None:
+    """把老版本写在插件目录里的 .cache/maps 迁移到 plugin_data。
+
+    老版本（<=1.2.0）把缓存写在 <插件目录>/.cache/maps，
+    不符合审核规范。这里做一次性迁移，避免用户已缓存的地图失效。
+    """
+    try:
+        legacy = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), ".cache", "maps"
+        )
+        if not os.path.isdir(legacy):
+            return
+        if os.path.isdir(_CACHE_DIR) and os.listdir(_CACHE_DIR):
+            return  # 新目录已有数据，不用迁移
+        os.makedirs(_CACHE_DIR, exist_ok=True)
+        import shutil
+
+        moved = 0
+        for name in os.listdir(legacy):
+            s = os.path.join(legacy, name)
+            d = os.path.join(_CACHE_DIR, name)
+            if os.path.isfile(s) and not os.path.exists(d):
+                shutil.copy2(s, d)
+                moved += 1
+        if moved:
+            logger.info("[df_loot] 已迁移 %d 个地图缓存到 plugin_data", moved)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+try:
+    _migrate_legacy_cache()
+except Exception:  # noqa: BLE001
+    pass
 
 _CDN = "https://ossweb-img.qq.com/images/dfm/cp/a20240729directory/img"
 
