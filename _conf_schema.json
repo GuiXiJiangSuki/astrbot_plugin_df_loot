@@ -1,9 +1,31 @@
 {
   "basic": {
     "description": "① 基础连接",
-    "hint": "插件连哪个 overlay、多久轮询一次",
+    "hint": "插件连哪个服务、多久轮询一次",
     "type": "object",
     "items": {
+      "df_connect_enabled": {
+        "description": "启用基础连接",
+        "type": "bool",
+        "default": true,
+        "hint": "总开关。关闭后插件不再轮询数据源、不检测新对局，也就不会自动播报出货。查询类命令（/df 卡战备、/df 今日战绩 等）仍然可用。适合临时停掉轮询、或数据源还没准备好时使用。"
+      },
+      "df_source": {
+        "description": "数据源",
+        "type": "string",
+        "default": "xixi",
+        "options": [
+          "xixi",
+          "overlay"
+        ],
+        "hint": "xixi = 走汐汐工具箱（推荐，免装 delta-force-overlay）；overlay = 走原版 delta-force-overlay。两者的接口路径不同，插件会自动适配。"
+      },
+      "df_xixi_url": {
+        "description": "汐汐工具箱地址",
+        "type": "string",
+        "default": "http://192.168.1.5:8800",
+        "hint": "汐汐工具箱的地址。插件通过 /df/api/state 读取对局数据。示例：http://192.168.1.5:8800"
+      },
       "df_overlay_url": {
         "description": "Overlay 服务地址",
         "type": "string",
@@ -14,7 +36,7 @@
         "description": "轮询间隔（秒）",
         "type": "int",
         "default": 20,
-        "hint": "多久检查一次 overlay 的新对局。建议 20-60 秒"
+        "hint": "多久检查一次新对局。建议 20-60 秒"
       },
       "df_startup_backfill_minutes": {
         "description": "启动时回填时间（分钟）",
@@ -24,7 +46,6 @@
       }
     }
   },
-
   "broadcast": {
     "description": "② 播报开关",
     "hint": "要不要播报、播给谁",

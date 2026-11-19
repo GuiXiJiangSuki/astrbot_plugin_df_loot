@@ -161,26 +161,52 @@ class LootBattle:
 
 
 class OverlayClient:
-    """delta-force-overlay 的 HTTP 客户端。"""
+    """对局数据客户端。
 
-    def __init__(self, base_url: str, timeout: float = 15.0) -> None:
+    支持两种数据源（接口路径不同，返回结构一致）：
+      · xixi    汐汐工具箱        → {base}/df/api/state
+      · overlay delta-force-overlay → {base}/api/state
+
+    base_url 结尾如果已经带 /df，就不再重复拼接。
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        timeout: float = 15.0,
+        source: str = "xixi",
+    ) -> None:
         self.base_url = (base_url or "").rstrip("/")
         self.timeout = timeout
+        self.source = (source or "xixi").strip().lower()
+
+    def _api(self, path: str) -> str:
+        """拼出接口地址。
+
+        path 形如 "/api/state"。
+        xixi 源的模块挂在 /df 下，所以要加前缀；
+        如果 base_url 用户自己已经填了 /df 结尾，就不重复加。
+        """
+        base = self.base_url
+        p = path if path.startswith("/") else "/" + path
+        if self.source == "xixi" and not base.endswith("/df"):
+            return f"{base}/df{p}"
+        return f"{base}{p}"
 
     async def fetch_state(self) -> dict[str, Any] | None:
         """拉取 /api/state。"""
         if not self.base_url:
             return None
         if aiohttp is None:
-            logger.error("[df_loot] 缺少 aiohttp 依赖，无法请求 overlay")
+            logger.error("[df_loot] 缺少 aiohttp 依赖，无法请求数据源")
             return None
-        url = f"{self.base_url}/api/state"
+        url = self._api("/api/state")
         try:
             timeout = aiohttp.ClientTimeout(total=self.timeout)
             async with aiohttp.ClientSession(timeout=timeout) as sess:
                 async with sess.get(url) as resp:
                     if resp.status != 200:
-                        logger.warning("[df_loot] overlay 返回 %s: %s", resp.status, url)
+                        logger.warning("[df_loot] 数据源返回 %s: %s", resp.status, url)
                         return None
                     return await resp.json(content_type=None)
         except asyncio.TimeoutError:
@@ -200,7 +226,7 @@ class OverlayClient:
         if path.startswith("http"):
             url = path
         else:
-            url = f"{self.base_url}{path}"
+            url = self._api(path)
         try:
             timeout = aiohttp.ClientTimeout(total=self.timeout)
             async with aiohttp.ClientSession(timeout=timeout) as sess:
@@ -234,11 +260,11 @@ class OverlayClient:
         candidates.append(
             f"https://playerhub.df.qq.com/playerhub/60004/object/{item_id}.png"
         )
-        # 软件代理：把真实地址交给 overlay 下载（它有 md5 缓存，第二次开始秒开）
+        # 软件代理：把真实地址交给数据源下载（overlay 有 md5 缓存，第二次开始秒开）
         if pic and pic.startswith("http") and self.base_url:
             from urllib.parse import quote
 
-            candidates.append(f"{self.base_url}/itemurl/?u={quote(pic, safe='')}")
+            candidates.append(self._api(f"/itemurl/?u={quote(pic, safe='')}"))
 
         timeout = aiohttp.ClientTimeout(total=self.timeout)
         for url in candidates:

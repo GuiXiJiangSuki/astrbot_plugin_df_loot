@@ -176,8 +176,22 @@ class DfLootPlugin(Star):
 
 
     @property
-    def overlay_url(self) -> str:
+    def source(self) -> str:
+        """数据源：xixi（汐汐工具箱）或 overlay（原版 delta-force-overlay）。"""
+        v = str(self._cfg("df_source", "xixi")).strip().lower()
+        return v if v in ("xixi", "overlay") else "xixi"
+
+    @property
+    def data_url(self) -> str:
+        """当前数据源的地址。"""
+        if self.source == "xixi":
+            return str(self._cfg("df_xixi_url", "http://192.168.1.5:8800")).strip()
         return str(self._cfg("df_overlay_url", "http://192.168.1.5:8788")).strip()
+
+    @property
+    def overlay_url(self) -> str:
+        """兼容旧代码：等价于 data_url。"""
+        return self.data_url
 
     @property
     def groups(self) -> list[str]:
@@ -224,6 +238,19 @@ class DfLootPlugin(Star):
         return out
 
     @property
+    def connect_enabled(self) -> bool:
+        """基础连接总开关。关闭后不轮询、不播报（查询命令不受影响）。"""
+        try:
+            v = self._cfg("df_connect_enabled", True)
+        except Exception:  # noqa: BLE001
+            return True
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() not in ("0", "false", "off", "no", "")
+        return bool(v)
+
+    @property
     def poll_interval(self) -> int:
         try:
             v = int(self._cfg("df_poll_interval", 30))
@@ -234,7 +261,18 @@ class DfLootPlugin(Star):
     # ─────────────── 生命周期 ───────────────
 
     async def initialize(self) -> None:
-        self._client = OverlayClient(self.overlay_url)
+        self._client = OverlayClient(self.data_url, source=self.source)
+
+        # ── 基础连接总开关 ──
+        # 关闭时不启动轮询（不拉数据、不检测新对局、不播报），
+        # 但每日汇总 / 查询命令 / 外部上报仍然可用。
+        if not self.connect_enabled:
+            self._running = False
+            logger.info("[df_loot] 基础连接已关闭（df_connect_enabled=false），跳过轮询")
+            await self._register_daily_job()
+            self._register_report_api()
+            return
+
         self._running = True
         self._task = asyncio.create_task(self._poll_loop(), name="df_loot_poll")
 
@@ -1083,8 +1121,13 @@ class DfLootPlugin(Star):
 
     async def _poll_once(self) -> None:
         """轮询一次。"""
+        # 运行中被关掉开关 → 直接跳过（插件重载后才会完全停）
+        if not self.connect_enabled:
+            self._last_error = "基础连接已关闭"
+            return
+
         if self._client is None:
-            self._client = OverlayClient(self.overlay_url)
+            self._client = OverlayClient(self.data_url, source=self.source)
 
         self._poll_count += 1
         state = await self._client.fetch_state()
@@ -2246,7 +2289,7 @@ class DfLootPlugin(Star):
             battle, item_ids = random_battle()
             item_pics: dict[str, bytes] = {}
             if self._client is None:
-                self._client = OverlayClient(self.overlay_url)
+                self._client = OverlayClient(self.data_url, source=self.source)
             for itid in item_ids:
                 data = await self._client.fetch_item_pic(itid)
                 if data:
